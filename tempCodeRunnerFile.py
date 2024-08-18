@@ -1,1 +1,0 @@
-ses=len(transcription[-2]) if len(transcription) > 1 else 0)

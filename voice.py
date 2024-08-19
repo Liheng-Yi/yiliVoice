@@ -35,7 +35,7 @@ def main():
     recorder.energy_threshold = args.energy_threshold
     recorder.dynamic_energy_threshold = False
     source = sr.Microphone(sample_rate=16000)
-    audio_model = whisper.load_model("small.en")
+    audio_model = whisper.load_model("medium.en")
 
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
@@ -54,6 +54,9 @@ def main():
 
 
     print("Model loaded.\n")
+    filterList = ["i'm sorry", "i'll see you next time.", "I'll see you next time. Bye.","i'm not gonna lie.","Thank you."]
+    for sentence in filterList:
+        sentence = sentence.lower()
 
     while True:
         try:
@@ -68,15 +71,21 @@ def main():
                 data_queue.queue.clear()
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
-                text = result['text'].strip()
+                text = result['text'].strip()   
 
-                if phrase_complete:
-                    transcription.append(text)
+                if text.lower() not in filterList:
+                    if phrase_complete:
+                        transcription.append(text)
+                    else:
+                        if transcription:
+                            transcription[-1] = text
+                        else:
+                            transcription.append(text)
+                    pyautogui.write(transcription[-1], interval=0.01)
                 else:
-                    transcription[-1] = text
-                # Clear previous text and type new transcription
-                # pyautogui.press('backspace', presses=len(transcription[-2]) if len(transcription) > 1 else 0)
-                pyautogui.write(transcription[-1], interval=0.01)
+                    print("filtered:",text.lower())
+
+                
         except KeyboardInterrupt:
             break
 

@@ -5,29 +5,18 @@ import speech_recognition as sr
 import whisper
 import torch
 import pyautogui
+
 from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
 from sys import platform
-
-# Define permissible chunk length threshold
-lucid_threshold = 0.3
-
-def should_reset_prompt(seek, num_frames, N_FRAMES):
-    # First chunk or fully contained within num_frames
-    if (seek == 0) or ((seek + N_FRAMES) / num_frames < 1.0):
-        return True
-    else:
-        # Calculate lucidity score for potentially the last chunk
-        lucid_score = (num_frames - seek) / N_FRAMES
-        return lucid_score < lucid_threshold
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="medium", help="Model to use",
                         choices=["tiny", "base", "small", "medium", "large"])
     parser.add_argument("--non_english", action='store_true',
-                        help="Don't use the English model.")
+                        help="Don't use the english model.")
     parser.add_argument("--energy_threshold", default=1000,
                         help="Energy level for mic to detect.", type=int)
     parser.add_argument("--record_timeout", default=2,
@@ -35,10 +24,8 @@ def main():
     parser.add_argument("--phrase_timeout", default=3,
                         help="How much empty space between recordings before we "
                              "consider it a new line in the transcription.", type=float)
-    if 'linux' in platform:
-        parser.add_argument("--default_microphone", default='pulse',
-                            help="Default microphone name for SpeechRecognition. "
-                                 "Run this with 'list' to view available Microphones.", type=str)
+    parser.add_argument("--volume_threshold", default=0.01,
+                        help="Minimum volume level to consider valid audio.", type=float)
     args = parser.parse_args()
 
     # Initialize audio processing
@@ -46,23 +33,33 @@ def main():
     recorder.energy_threshold = args.energy_threshold
     recorder.dynamic_energy_threshold = False
     source = sr.Microphone(sample_rate=16000)
-    audio_model = whisper.load_model(args.model + (".en" if args.non_english else ""))
+    audio_model = whisper.load_model("medium.en")
 
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
+    volume_threshold = args.volume_threshold
     transcription = ['']
-    data_queue = Queue()
-
-    def record_callback(_, audio: sr.AudioData):
-        data_queue.put(audio.get_raw_data())
+    
+    def record_callback(_, audio:sr.AudioData):
+        audio_data = audio.get_raw_data()
+        volume = np.sqrt(np.mean(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) ** 2))
+        if volume > volume_threshold:
+            data_queue.put(audio_data)
+        else:
+            print(f"Discarded low volume audio: {volume}")
 
     with source:
         recorder.adjust_for_ambient_noise(source)
+
+    data_queue = Queue()
     recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
 
     print("Model loaded.\n")
-    num_frames = 0  # You need to determine how to set this appropriately
-    phrase_time = datetime.utcnow()  # Initialize phrase_time before the loop
+    filterList = ["i'm sorry","Thanks for watching!", "i'll see you next time.", "I'll see you next time. Bye.","i'm not gonna lie.","Thank you.", 
+                  "I'm not gonna lie.", "I'm going to go get some food.", "Thank you. ",
+                  "Bye.", "Thank you..", "Thank you. Bye.",
+                   " I'm not gonna lie.", " I'm not gonna lie. "]
+    filterList = [phrase.lower() for phrase in filterList]
     while True:
         try:
             now = datetime.utcnow()
@@ -76,18 +73,19 @@ def main():
                 data_queue.queue.clear()
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
-                text = result['text'].strip()
+                text = result['text'].strip()   
 
-
-                if should_reset_prompt(num_frames, len(audio_np), 1024):  # Example frame handling
-                    transcription.append(text)
-                else:
-                    if transcription:
-                        transcription[-1] = text
-                    else:
+                if text.lower() not in filterList:
+                    if phrase_complete:
                         transcription.append(text)
-                pyautogui.write(transcription[-1], interval=0.01)
-
+                    else:
+                        if transcription:
+                            transcription[-1] += ' ' + text
+                        else:
+                            transcription.append(text)
+                    pyautogui.write(transcription[-1], interval=0.01)
+                else:
+                    print("filtered:", text.lower())
 
         except KeyboardInterrupt:
             break

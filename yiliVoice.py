@@ -11,6 +11,16 @@ from queue import Queue
 from time import sleep
 from sys import platform
 
+def clean_sentence(text):
+    # Remove period at the end of the sentence
+    text = text.strip()
+    if text.endswith('.'):
+        text = text[:-1]
+    # Capitalize the first letter
+    text = text.capitalize()
+    return text
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="medium", help="Model to use",
@@ -37,13 +47,13 @@ def main():
 
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
-    volume_threshold = args.volume_threshold
+    volume_threshold = 200
     transcription = ['']
-    
     def record_callback(_, audio:sr.AudioData):
         audio_data = audio.get_raw_data()
         volume = np.sqrt(np.mean(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) ** 2))
         if volume > volume_threshold:
+            print(f"Volume: {volume}")
             data_queue.put(audio_data)
         else:
             print(f"Discarded low volume audio: {volume}")
@@ -60,6 +70,10 @@ def main():
                   "Bye.", "Thank you..", "Thank you. Bye.",
                    " I'm not gonna lie.", " I'm not gonna lie. "]
     filterList = [phrase.lower() for phrase in filterList]
+    
+    # Initialize phrase_time before the loop
+    phrase_time = datetime.utcnow()
+    
     while True:
         try:
             now = datetime.utcnow()
@@ -74,7 +88,7 @@ def main():
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
                 text = result['text'].strip()   
-
+                text = clean_sentence(text)
                 if text.lower() not in filterList:
                     if phrase_complete:
                         transcription.append(text)
@@ -85,7 +99,7 @@ def main():
                             transcription.append(text)
                     pyautogui.write(transcription[-1], interval=0.01)
                 else:
-                    print("filtered:", text.lower())
+                    print("Hallucination detected:", text.lower())
 
         except KeyboardInterrupt:
             break

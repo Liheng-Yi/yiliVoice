@@ -5,8 +5,9 @@ import speech_recognition as sr
 import whisper
 import torch
 import pyautogui
+import keyboard
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from queue import Queue
 from time import sleep
 from sys import platform
@@ -47,7 +48,7 @@ def main():
 
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
-    volume_threshold = 200
+    volume_threshold = args.volume_threshold * 32768.0  # Scale to audio range
     transcription = ['']
     def record_callback(_, audio:sr.AudioData):
         audio_data = audio.get_raw_data()
@@ -65,19 +66,31 @@ def main():
     recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
 
     print("Model loaded.\n")
+    print("Press Ctrl+Q to start/stop recording...")
+    
+    recording_active = False
     filterList = ["i'm sorry","Thanks for watching!", "i'll see you next time.", "I'll see you next time. Bye.","i'm not gonna lie.","Thank you.", 
                   "I'm not gonna lie.", "I'm going to go get some food.", "Thank you. ",
                   "Bye.", "Thank you..", "Thank you. Bye.",
                    " I'm not gonna lie.", " I'm not gonna lie. "]
     filterList = [phrase.lower() for phrase in filterList]
     
-    # Initialize phrase_time before the loop
-    phrase_time = datetime.utcnow()
+    phrase_time = datetime.now(UTC)
     
     while True:
         try:
-            now = datetime.utcnow()
-            if not data_queue.empty():
+            # Check for Ctrl+Q press to toggle recording
+            if keyboard.is_pressed('ctrl+q'):
+                recording_active = not recording_active  # Toggle the recording state
+                if recording_active:
+                    print("Recording started...")
+                else:
+                    print("Recording stopped...")
+                sleep(0.5)  # Add a small delay to prevent multiple toggles
+                continue
+
+            now = datetime.now(UTC)
+            if not data_queue.empty() and recording_active:
                 phrase_complete = False
                 if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
                     phrase_complete = True
@@ -87,7 +100,17 @@ def main():
                 data_queue.queue.clear()
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
                 result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
-                text = result['text'].strip()   
+                
+                # Get average probability from segments
+                segments = result.get('segments', [])
+                if segments:
+                    avg_probability = sum(s.get('avg_logprob', -1) for s in segments) / len(segments)
+                    confidence_threshold = -1  # Adjust this threshold as needed (-1 is medium confidence, higher is better)
+                    if avg_probability < confidence_threshold:
+                        print(f"Low confidence ({avg_probability:.2f}), discarding: {result['text']}")
+                        continue
+        
+                text = result['text'].strip()
                 text = clean_sentence(text)
                 if text.lower() not in filterList:
                     if phrase_complete:

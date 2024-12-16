@@ -39,17 +39,30 @@ def main():
                         help="Minimum volume level to consider valid audio.", type=float)
     args = parser.parse_args()
 
+    # More detailed GPU check
+    if torch.cuda.is_available():
+        device = "cuda"
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = "cpu"
+        print("CUDA not available, using CPU")
+    
     # Initialize audio processing
     recorder = sr.Recognizer()
     recorder.energy_threshold = args.energy_threshold
     recorder.dynamic_energy_threshold = False
     source = sr.Microphone(sample_rate=16000)
-    audio_model = whisper.load_model("medium.en")
-
+    
+    # Load model with weights_only=True to avoid the warning
+    model_path = whisper.load_model("medium.en", device=device, download_root=None)
+    audio_model = model_path.to(device)
+    
+    print(f"Model loaded on {device}")
+    
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
     volume_threshold = args.volume_threshold * 32768.0  # Scale to audio range
-    transcription = ['']
+    transcription = []
     def record_callback(_, audio:sr.AudioData):
         audio_data = audio.get_raw_data()
         volume = np.sqrt(np.mean(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) ** 2))
@@ -63,30 +76,54 @@ def main():
         recorder.adjust_for_ambient_noise(source)
 
     data_queue = Queue()
-    recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
-
-    print("Model loaded.\n")
-    print("Press Ctrl+Q to start/stop recording...")
-    
     recording_active = False
-    filterList = ["i'm sorry","Thanks for watching!", "i'll see you next time.", "I'll see you next time. Bye.","i'm not gonna lie.","Thank you.", 
-                  "I'm not gonna lie.", "I'm going to go get some food.", "Thank you. ",
-                  "Bye.", "Thank you..", "Thank you. Bye.",
-                   " I'm not gonna lie.", " I'm not gonna lie. "]
-    filterList = [phrase.lower() for phrase in filterList]
+    background_listener = None
+    phrase_time = datetime.now(UTC)  # Initialize phrase_time here
     
-    phrase_time = datetime.now(UTC)
+    # Add filterList definition here
+    filterList = [
+        "i'm sorry",
+        "thanks for watching!",
+        "i'll see you next time.",
+        "i'll see you next time. bye.",
+        "i'm not gonna lie.",
+        "thank you.",
+        "i'm not gonna lie.",
+        "i'm going to go get some food.",
+        "thank you.",
+        "bye.",
+        "thank you..",
+        "thank you. bye.",
+        "i'm not gonna lie.",
+        "i'm not gonna lie."
+    ]
+    filterList = [phrase.lower() for phrase in filterList]  # Convert all to lowercase
     
     while True:
         try:
             # Check for Ctrl+Q press to toggle recording
             if keyboard.is_pressed('ctrl+q'):
-                recording_active = not recording_active  # Toggle the recording state
+                recording_active = not recording_active
                 if recording_active:
                     print("Recording started...")
+                    transcription = []
+                    data_queue.queue.clear()
+                    phrase_time = datetime.now(UTC)  # Reset phrase_time when starting new recording
+                    background_listener = recorder.listen_in_background(
+                        source, 
+                        record_callback, 
+                        phrase_time_limit=record_timeout
+                    )
                 else:
                     print("Recording stopped...")
-                sleep(0.5)  # Add a small delay to prevent multiple toggles
+                    if background_listener:
+                        background_listener(wait_for_stop=False)
+                        background_listener = None
+                    print("\nSession Transcription:")
+                    for line in transcription:
+                        print(line)
+                    print("\n")
+                sleep(0.5)
                 continue
 
             now = datetime.now(UTC)
@@ -99,7 +136,12 @@ def main():
                 audio_data = b''.join(data_queue.queue)
                 data_queue.queue.clear()
                 audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
+                # Add device specification for transcription
+                result = audio_model.transcribe(
+                    audio_np, 
+                    fp16=(device == "cuda"),  # Use fp16 only when on GPU
+                    language="en" if not args.non_english else None
+                )
                 
                 # Get average probability from segments
                 segments = result.get('segments', [])

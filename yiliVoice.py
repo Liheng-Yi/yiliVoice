@@ -79,6 +79,7 @@ def main():
     recording_active = False
     background_listener = None
     phrase_time = datetime.now(UTC)  # Initialize phrase_time here
+    last_activity_time = datetime.now(UTC)  # Add this line to track last activity
     
     # Add filterList definition here
     filterList = [
@@ -109,6 +110,7 @@ def main():
                     transcription = []
                     data_queue.queue.clear()
                     phrase_time = datetime.now(UTC)  # Reset phrase_time when starting new recording
+                    last_activity_time = datetime.now(UTC)  # Reset activity timer
                     background_listener = recorder.listen_in_background(
                         source, 
                         record_callback, 
@@ -127,7 +129,22 @@ def main():
                 continue
 
             now = datetime.now(UTC)
+            
+            # Check for idle timeout (4 minutes)
+            if recording_active and (now - last_activity_time > timedelta(minutes=4)):
+                print("Idle timeout reached. Recording stopped...")
+                recording_active = False
+                if background_listener:
+                    background_listener(wait_for_stop=False)
+                    background_listener = None
+                print("\nSession Transcription:")
+                for line in transcription:
+                    print(line)
+                print("\n")
+                continue
+
             if not data_queue.empty() and recording_active:
+                last_activity_time = now  # Update activity timer when audio is processed
                 phrase_complete = False
                 if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
                     phrase_complete = True

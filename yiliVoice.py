@@ -64,8 +64,8 @@ def create_overlay_window():
     canvas = tk.Canvas(root, width=20, height=20, bg='black', highlightthickness=0)
     canvas.pack()
     
-    # Create the indicator circle
-    indicator = canvas.create_oval(5, 5, 15, 15, fill='red')
+    # Create the indicator circle - initialize as pink (ready state)
+    indicator = canvas.create_oval(5, 5, 15, 15, fill='pink')
     
     # Position the window at the top center of the screen
     screen_width = root.winfo_screenwidth()
@@ -73,8 +73,11 @@ def create_overlay_window():
     
     return root, canvas, indicator
 
-def update_indicator(canvas, indicator, is_recording):
-    color = 'green' if is_recording else 'red'
+def update_indicator(canvas, indicator, is_recording, idle=False):
+    if idle:
+        color = 'red'  # Complete shutdown
+    else:
+        color = 'green' if is_recording else 'pink'  # Green for recording, pink for ready
     canvas.itemconfig(indicator, fill=color)
 
 def main():
@@ -94,167 +97,189 @@ def main():
                         help="Minimum volume level to consider valid audio.", type=float)
     args = parser.parse_args()
 
-    # More detailed GPU check
-    if torch.cuda.is_available():
-        device = "cuda"
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = "cpu"
-        print("CUDA not available, using CPU")
-    
-    # Initialize audio processing
-    recorder = sr.Recognizer()
-    recorder.energy_threshold = args.energy_threshold
-    recorder.dynamic_energy_threshold = False
-    source = sr.Microphone(sample_rate=16000)
-    
-    # Load model with weights_only=True to avoid the warning
-    model_path = whisper.load_model("medium.en", device=device, download_root=None)
-    audio_model = model_path.to(device)
-    
-    print(f"Model loaded on {device}")
-    
-    record_timeout = args.record_timeout
-    phrase_timeout = args.phrase_timeout
-    volume_threshold = args.volume_threshold * 32768.0  # Scale to audio range
-    transcription = []
-    def record_callback(_, audio:sr.AudioData):
-        audio_data = audio.get_raw_data()
-        volume = np.sqrt(np.mean(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) ** 2))
-        if volume > volume_threshold:
-            print(f"Volume: {volume}")
-            data_queue.put(audio_data)
-        else:
-            print(f"Discarded low volume audio: {volume}")
-
-    with source:
-        recorder.adjust_for_ambient_noise(source)
-
-    data_queue = Queue()
-    recording_active = False
-    background_listener = None
-    phrase_time = datetime.now(timezone.utc)  # Updated UTC reference
-    last_activity_time = datetime.now(timezone.utc)  # Updated UTC reference
-    
-    # Add filterList definition here
-    filterList = [
-        "i'm sorry",
-        "thanks for watching!",
-        "i'll see you next time.",
-        "i'm not gonna lie.",
-        "thank you.",
-        "i'm going to go get some food.",
-        "bye."
-    ]
-    filterList = list({phrase.lower() for phrase in filterList})  # Use set comprehension to deduplicate
-    
-    # Create overlay window
-    root, canvas, indicator = create_overlay_window()
-    
     while True:
         try:
-            # Update the tkinter window
-            root.update()
+            # Create overlay window
+            root, canvas, indicator = create_overlay_window()
             
-            # Check for Ctrl+Q press to toggle recording
-            if keyboard.is_pressed('ctrl+q'):
-                recording_active = not recording_active
-                # Update indicator color
-                update_indicator(canvas, indicator, recording_active)
-                
-                if recording_active:
-                    print("Recording started...")
-                    transcription = []
-                    data_queue.queue.clear()
-                    phrase_time = datetime.now(timezone.utc)  # Reset phrase_time when starting new recording
-                    last_activity_time = datetime.now(timezone.utc)  # Reset activity timer
-                    background_listener = recorder.listen_in_background(
-                        source, 
-                        record_callback, 
-                        phrase_time_limit=record_timeout
-                    )
-                else:
-                    print("Recording stopped...")
+            # Define record_callback function inside main to access data_queue
+            def record_callback(_, audio: sr.AudioData) -> None:
+                """
+                Callback function that receives audio data when recording
+                """
+                data = audio.get_raw_data()
+                data_queue.put(data)
+            
+            # Initialize everything else
+            if torch.cuda.is_available():
+                device = "cuda"
+                print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+            else:
+                device = "cpu"
+                print("CUDA not available, using CPU")
+            
+            # Initialize audio processing
+            recorder = sr.Recognizer()
+            recorder.energy_threshold = args.energy_threshold
+            recorder.dynamic_energy_threshold = False
+            source = sr.Microphone(sample_rate=16000)
+            
+            # Load model
+            print("Loading Whisper model...")
+            model_path = whisper.load_model("medium.en", device=device, download_root=None)
+            audio_model = model_path.to(device)
+            print(f"Model loaded on {device}")
+            
+            record_timeout = args.record_timeout
+            phrase_timeout = args.phrase_timeout
+            volume_threshold = args.volume_threshold * 32768.0
+            transcription = []
+            
+            with source:
+                recorder.adjust_for_ambient_noise(source)
+
+            data_queue = Queue()
+            recording_active = False
+            background_listener = None
+            phrase_time = datetime.now(timezone.utc)
+            last_activity_time = datetime.now(timezone.utc)
+            last_transcription_time = datetime.now(timezone.utc)
+            
+            # Add filterList definition
+            filterList = [
+                "i'm sorry",
+                "thanks for watching!",
+                "i'll see you next time.",
+                "i'm not gonna lie.",
+                "thank you.",
+                "i'm going to go get some food.",
+                "bye."
+            ]
+            filterList = list({phrase.lower() for phrase in filterList})
+
+            while True:
+                try:
+                    root.update()
+                    now = datetime.now(timezone.utc)
+                    
+                    # Add 2-minute complete shutdown check for both states
+                    if (now - last_activity_time) > timedelta(minutes=2):
+                        print("No activity for 2 minutes, shutting down...")
+                        update_indicator(canvas, indicator, False, idle=True)  # Set to red
+                        root.update()
+                        sleep(1)  # Brief pause to show red indicator
+                        if background_listener:
+                            background_listener(wait_for_stop=False)
+                        if device == "cuda":
+                            torch.cuda.empty_cache()
+                        root.destroy()
+                        break  # Break inner loop to restart main
+                    
+                    # Check for Ctrl+Q press to toggle recording
+                    if keyboard.is_pressed('ctrl+q'):
+                        recording_active = not recording_active
+                        # Update indicator color (reset idle state)
+                        update_indicator(canvas, indicator, recording_active, idle=False)
+                        last_activity_time = datetime.now(timezone.utc)  # Reset timer on toggle
+                        
+                        if recording_active:
+                            print("Recording started...")
+                            if audio_model is None:
+                                print("Reloading Whisper model...")
+                                audio_model = model_path.to(device)  # Reload the model
+                            transcription = []
+                            data_queue.queue.clear()
+                            phrase_time = datetime.now(timezone.utc)
+                            last_activity_time = datetime.now(timezone.utc)
+                            last_transcription_time = datetime.now(timezone.utc)  # Reset transcription timer
+                            background_listener = recorder.listen_in_background(
+                                source, 
+                                record_callback, 
+                                phrase_time_limit=record_timeout
+                            )
+                        else:
+                            print("Recording stopped...")
+                            if background_listener:
+                                background_listener(wait_for_stop=False)
+                                background_listener = None
+                            print("\nSession Transcription:")
+                            for line in transcription:
+                                print(line)
+                            print("\n")
+                        sleep(0.5)
+                        continue
+
+                    if not data_queue.empty() and recording_active:
+                        last_activity_time = now  # Update activity timer when audio is processed
+                        phrase_complete = False
+                        if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
+                            phrase_complete = True
+                        phrase_time = now
+
+                        audio_data = bytes()
+                        while not data_queue.empty():
+                            audio_data += data_queue.get()
+                        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                        # Add device specification for transcription
+                        result = audio_model.transcribe(
+                            audio_np, 
+                            fp16=(device == "cuda"),  # Use fp16 only when on GPU
+                            language="en" if not args.non_english else None
+                        )
+                        
+                        # Get average probability from segments
+                        segments = result.get('segments', [])
+                        
+                        text = result['text'].strip()
+                        text = clean_sentence(text)
+                        if text.lower() not in filterList:
+                            if phrase_complete:
+                                # Check for duplicates before adding
+                                if not transcription or not is_duplicate_or_partial(text, transcription[-1]):
+                                    transcription.append(text)
+                                    pyautogui.write(text, interval=0.01)
+                                    last_transcription_time = datetime.now(timezone.utc)  # Update last transcription time
+                            else:
+                                if transcription:
+                                    # Only append if it's not a duplicate
+                                    if not is_duplicate_or_partial(text, transcription[-1]):
+                                        transcription[-1] += ' ' + text
+                                        pyautogui.write(' ' + text, interval=0.01)
+                                        last_transcription_time = datetime.now(timezone.utc)  # Update last transcription time
+                                else:
+                                    transcription.append(text)
+                                    pyautogui.write(text, interval=0.01)
+                                    last_transcription_time = datetime.now(timezone.utc)  # Update last transcription time
+                        else:
+                            print("Hallucination detected:", text.lower())
+
+                except Exception as e:
+                    print(f"Error in inner loop: {str(e)}")
+                    root.destroy()
                     if background_listener:
                         background_listener(wait_for_stop=False)
-                        background_listener = None
-                    print("\nSession Transcription:")
-                    for line in transcription:
-                        print(line)
-                    print("\n")
-                sleep(0.5)
-                continue
-
-            now = datetime.now(timezone.utc)
-            
-            # Check for idle timeout (4 minutes)
-            if recording_active and (now - last_activity_time > timedelta(minutes=4)):
-                print("Idle timeout reached. Recording stopped...")
-                recording_active = False
-                # Update indicator color
-                update_indicator(canvas, indicator, recording_active)
-                if background_listener:
-                    background_listener(wait_for_stop=False)
-                    background_listener = None
-                print("\nSession Transcription:")
-                for line in transcription:
-                    print(line)
-                print("\n")
-                continue
-
-            if not data_queue.empty() and recording_active:
-                last_activity_time = now  # Update activity timer when audio is processed
-                phrase_complete = False
-                if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
-                    phrase_complete = True
-                phrase_time = now
-
-                audio_data = bytes()
-                while not data_queue.empty():
-                    audio_data += data_queue.get()
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-                # Add device specification for transcription
-                result = audio_model.transcribe(
-                    audio_np, 
-                    fp16=(device == "cuda"),  # Use fp16 only when on GPU
-                    language="en" if not args.non_english else None
-                )
-                
-                # Get average probability from segments
-                segments = result.get('segments', [])
-                
-                text = result['text'].strip()
-                text = clean_sentence(text)
-                if text.lower() not in filterList:
-                    if phrase_complete:
-                        # Check for duplicates before adding
-                        if not transcription or not is_duplicate_or_partial(text, transcription[-1]):
-                            transcription.append(text)
-                            pyautogui.write(text, interval=0.01)
-                    else:
-                        if transcription:
-                            # Only append if it's not a duplicate
-                            if not is_duplicate_or_partial(text, transcription[-1]):
-                                transcription[-1] += ' ' + text
-                                pyautogui.write(' ' + text, interval=0.01)
-                        else:
-                            transcription.append(text)
-                            pyautogui.write(text, interval=0.01)
-                else:
-                    print("Hallucination detected:", text.lower())
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
+                    break  # Break inner loop to restart main
 
         except KeyboardInterrupt:
-            # Cleanup
+            print("\nKeyboard interrupt detected. Exiting...")
             root.destroy()
             if background_listener:
                 background_listener(wait_for_stop=False)
             if device == "cuda":
                 torch.cuda.empty_cache()
-            break
-
-    print("\n\nTranscription:")
-    for line in transcription:
-        print(line)
+            return  # Exit the program completely
+        
+        except Exception as e:
+            print(f"Error in outer loop: {str(e)}")
+            if 'root' in locals():
+                root.destroy()
+            if 'background_listener' in locals() and background_listener:
+                background_listener(wait_for_stop=False)
+            if 'device' in locals() and device == "cuda":
+                torch.cuda.empty_cache()
+            sleep(1)  # Wait before restarting
 
 if __name__ == "__main__":
     main()

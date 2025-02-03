@@ -6,6 +6,8 @@ import whisper
 import torch
 import pyautogui
 import keyboard
+import tkinter as tk
+from tkinter import ttk
 
 from datetime import datetime, timedelta, timezone
 from queue import Queue
@@ -47,6 +49,33 @@ def is_duplicate_or_partial(new_text, previous_text):
             return True
             
     return False
+
+def create_overlay_window():
+    root = tk.Tk()
+    root.title("Voice Status")
+    
+    # Make window stay on top
+    root.attributes('-topmost', True)
+    
+    # Remove window decorations
+    root.overrideredirect(True)
+    
+    # Create a small circular indicator
+    canvas = tk.Canvas(root, width=20, height=20, bg='black', highlightthickness=0)
+    canvas.pack()
+    
+    # Create the indicator circle
+    indicator = canvas.create_oval(5, 5, 15, 15, fill='red')
+    
+    # Position the window at the top center of the screen
+    screen_width = root.winfo_screenwidth()
+    root.geometry(f'20x20+{(screen_width//2)-10}+0')
+    
+    return root, canvas, indicator
+
+def update_indicator(canvas, indicator, is_recording):
+    color = 'green' if is_recording else 'red'
+    canvas.itemconfig(indicator, fill=color)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -119,17 +148,26 @@ def main():
     ]
     filterList = list({phrase.lower() for phrase in filterList})  # Use set comprehension to deduplicate
     
+    # Create overlay window
+    root, canvas, indicator = create_overlay_window()
+    
     while True:
         try:
+            # Update the tkinter window
+            root.update()
+            
             # Check for Ctrl+Q press to toggle recording
             if keyboard.is_pressed('ctrl+q'):
                 recording_active = not recording_active
+                # Update indicator color
+                update_indicator(canvas, indicator, recording_active)
+                
                 if recording_active:
                     print("Recording started...")
                     transcription = []
                     data_queue.queue.clear()
-                    phrase_time = datetime.now(timezone.utc)
-                    last_activity_time = datetime.now(timezone.utc)
+                    phrase_time = datetime.now(timezone.utc)  # Reset phrase_time when starting new recording
+                    last_activity_time = datetime.now(timezone.utc)  # Reset activity timer
                     background_listener = recorder.listen_in_background(
                         source, 
                         record_callback, 
@@ -140,9 +178,6 @@ def main():
                     if background_listener:
                         background_listener(wait_for_stop=False)
                         background_listener = None
-                    # Clear CUDA cache if using GPU
-                    if device == "cuda":
-                        torch.cuda.empty_cache()
                     print("\nSession Transcription:")
                     for line in transcription:
                         print(line)
@@ -156,12 +191,11 @@ def main():
             if recording_active and (now - last_activity_time > timedelta(minutes=4)):
                 print("Idle timeout reached. Recording stopped...")
                 recording_active = False
+                # Update indicator color
+                update_indicator(canvas, indicator, recording_active)
                 if background_listener:
                     background_listener(wait_for_stop=False)
                     background_listener = None
-                # Clear CUDA cache if using GPU
-                if device == "cuda":
-                    torch.cuda.empty_cache()
                 print("\nSession Transcription:")
                 for line in transcription:
                     print(line)
@@ -210,7 +244,8 @@ def main():
                     print("Hallucination detected:", text.lower())
 
         except KeyboardInterrupt:
-            # Add cleanup here as well
+            # Cleanup
+            root.destroy()
             if background_listener:
                 background_listener(wait_for_stop=False)
             if device == "cuda":

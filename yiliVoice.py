@@ -101,6 +101,7 @@ def main():
         try:
             # Create overlay window
             root, canvas, indicator = create_overlay_window()
+            update_indicator(canvas, indicator, False)  # Start with pink
             
             # Define record_callback function inside main to access data_queue
             def record_callback(_, audio: sr.AudioData) -> None:
@@ -162,23 +163,33 @@ def main():
                     root.update()
                     now = datetime.now(timezone.utc)
                     
-                    # Add 2-minute complete shutdown check for both states
-                    if (now - last_activity_time) > timedelta(minutes=2):
-                        print("No activity for 2 minutes, shutting down...")
+                    # Check for 2-minute inactivity shutdown
+                    if (now - last_activity_time) > timedelta(seconds=100):
+                        print("No activity for 100 seconds, shutting down...")
                         update_indicator(canvas, indicator, False, idle=True)  # Set to red
                         root.update()
-                        sleep(1)  # Brief pause to show red indicator
+                        
+                        # Stop recording if active
                         if background_listener:
                             background_listener(wait_for_stop=False)
+                            background_listener = None
+                        
+                        # Clear CUDA cache if using GPU
                         if device == "cuda":
                             torch.cuda.empty_cache()
-                        root.destroy()
+                        
+                        # Wait for Ctrl+Q to restart
+                        while True:
+                            root.update()
+                            if keyboard.is_pressed('ctrl+q'):
+                                root.destroy()
+                                break
+                            sleep(0.1)
                         break  # Break inner loop to restart main
                     
-                    # Check for Ctrl+Q press to toggle recording
+                    # Normal Ctrl+Q toggle during active operation
                     if keyboard.is_pressed('ctrl+q'):
                         recording_active = not recording_active
-                        # Update indicator color (reset idle state)
                         update_indicator(canvas, indicator, recording_active, idle=False)
                         last_activity_time = datetime.now(timezone.utc)  # Reset timer on toggle
                         

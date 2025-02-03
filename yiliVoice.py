@@ -128,8 +128,8 @@ def main():
                     print("Recording started...")
                     transcription = []
                     data_queue.queue.clear()
-                    phrase_time = datetime.now(timezone.utc)  # Reset phrase_time when starting new recording
-                    last_activity_time = datetime.now(timezone.utc)  # Reset activity timer
+                    phrase_time = datetime.now(timezone.utc)
+                    last_activity_time = datetime.now(timezone.utc)
                     background_listener = recorder.listen_in_background(
                         source, 
                         record_callback, 
@@ -140,6 +140,9 @@ def main():
                     if background_listener:
                         background_listener(wait_for_stop=False)
                         background_listener = None
+                    # Clear CUDA cache if using GPU
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
                     print("\nSession Transcription:")
                     for line in transcription:
                         print(line)
@@ -156,6 +159,9 @@ def main():
                 if background_listener:
                     background_listener(wait_for_stop=False)
                     background_listener = None
+                # Clear CUDA cache if using GPU
+                if device == "cuda":
+                    torch.cuda.empty_cache()
                 print("\nSession Transcription:")
                 for line in transcription:
                     print(line)
@@ -182,15 +188,7 @@ def main():
                 
                 # Get average probability from segments
                 segments = result.get('segments', [])
-                if segments:
-                    avg_probability = sum(s.get('avg_logprob', -1) for s in segments) / len(segments)
-                    confidence_threshold = 0.2  # More meaningful threshold (0-1 scale)
-                    if avg_probability < confidence_threshold:
-                        print(f"Low confidence ({avg_probability:.2f}), discarding: {result['text']}")
-                        continue
-                    else:
-                        print(f"Confidence: {avg_probability:.2f} - Accepted")
-        
+                
                 text = result['text'].strip()
                 text = clean_sentence(text)
                 if text.lower() not in filterList:
@@ -212,6 +210,11 @@ def main():
                     print("Hallucination detected:", text.lower())
 
         except KeyboardInterrupt:
+            # Add cleanup here as well
+            if background_listener:
+                background_listener(wait_for_stop=False)
+            if device == "cuda":
+                torch.cuda.empty_cache()
             break
 
     print("\n\nTranscription:")

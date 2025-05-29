@@ -309,17 +309,17 @@ def main():
                         if device == "cuda":
                             torch.cuda.empty_cache()
                         
-                        # Wait for Ctrl+Q to restart
+                        # Wait for Ctrl+F8 to restart
                         while True:
                             root.update()
-                            if keyboard.is_pressed('ctrl+q'):
+                            if keyboard.is_pressed('ctrl+f8'):
                                 root.destroy()
                                 break
                             sleep(0.1)
                         break  # Break inner loop to restart main()
                     
-                    # Check for Ctrl+Q toggle (start/stop recording)
-                    if keyboard.is_pressed('ctrl+q'):
+                    # Check for Ctrl+F8 toggle (start/stop recording)
+                    if keyboard.is_pressed('ctrl+f8'):
                         recording_active = not recording_active
                         update_indicator(canvas, indicator, recording_active, idle=False)
                         last_activity_time = datetime.now(timezone.utc)

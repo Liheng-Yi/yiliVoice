@@ -14,9 +14,10 @@ import re  # NEW: For regex utilities
 from collections import deque
 
 from datetime import datetime, timedelta, timezone
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from time import sleep
 from sys import platform
+
 
 def clean_sentence(text):
     """
@@ -28,6 +29,11 @@ def clean_sentence(text):
     if text.endswith('.'):
         text = text[:-1]
     return text.capitalize()
+
+
+def normalize_filter_text(text: str) -> str:
+    """Normalize a phrase for duplicate/filler checks."""
+    return re.sub(r'[^a-z0-9 ]+', ' ', text.lower()).strip()
 
 def is_duplicate_or_partial(new_text, previous_text, min_word_count=3):
     """
@@ -159,48 +165,67 @@ class VoiceConfig:
         self.energy_threshold = args.energy_threshold
         self.record_timeout = args.record_timeout
         self.phrase_timeout = args.phrase_timeout
-        self.volume_threshold = args.volume_threshold * 32768.0
+        self.volume_threshold = args.volume_threshold
+        self.volume_threshold_raw = args.volume_threshold * 32768.0
+        self.no_speech_threshold = args.no_speech_threshold
         self.trailing_silence = args.trailing_silence
         self.threshold_adjustment = args.threshold_adjustment
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
-        
+
         # Filter list - externalize this to a config file later
-        self.filter_list = {
+        raw_filters = {
             "i'm sorry",
             "thanks for watching!",
             "i'll see you next time.",
             "i'm not gonna lie.",
             "thank you.",
+            "thank you",
+            "thank you very much",
+            "thanks",
+            "thanks very much",
+            "thanks everyone",
+            "thank you everyone",
             "i'm going to go get some food.",
             "i'm going to do it again.",
             "bye."
         }
+        self.filter_list = {normalize_filter_text(item) for item in raw_filters}
+        self.filter_patterns = [
+            re.compile(r'^(?:thank|thanks)(?: you)?(?: so much| very much)?(?: everyone| all)?$', re.I),
+            re.compile(r'^thanks(?: for watching| for tuning in)?$', re.I),
+        ]
+
 
 class AudioBuffer:
-    """Optimized audio buffer with size limits and efficient memory management"""
+    """Optimized audio buffer with size limits and efficient memory management."""
+
     def __init__(self, max_size):
         self.max_size = max_size
-        self.buffer = bytes()
+        self.buffer = bytearray()
         self._lock = threading.Lock()
-    
+
     def append(self, data):
+        if not data:
+            return
         with self._lock:
-            self.buffer += data
-            # Trim buffer if it exceeds max size
+            self.buffer.extend(data)
             if len(self.buffer) > self.max_size:
                 excess = len(self.buffer) - self.max_size
-                self.buffer = self.buffer[excess:]
-    
+                del self.buffer[:excess]
+
     def get_and_clear(self):
         with self._lock:
-            data = self.buffer
-            self.buffer = bytes()
+            if not self.buffer:
+                return bytes()
+            data = bytes(self.buffer)
+            self.buffer.clear()
             return data
-    
+
     def __len__(self):
         with self._lock:
             return len(self.buffer)
+
 
 class VoiceRecognitionApp:
     def __init__(self, config):
@@ -219,6 +244,7 @@ class VoiceRecognitionApp:
         # Audio processing
         self.data_queue = Queue()
         self.ui_update_queue = Queue()  # Queue for UI updates
+        self.transcription_queue = Queue(maxsize=3)
         self.audio_buffer = AudioBuffer(config.max_buffer_size)
         self.transcription = deque(maxlen=100)  # Limit transcription history
         
@@ -231,6 +257,15 @@ class VoiceRecognitionApp:
         self.root = None
         self.canvas = None
         self.indicator = None
+        
+    @staticmethod
+    def _drain_queue(queue_obj):
+        """Remove all pending items from a queue without blocking."""
+        try:
+            while True:
+                queue_obj.get_nowait()
+        except Empty:
+            return
         
     def initialize_model(self):
         """Initialize the Whisper model with progress indication"""
@@ -266,7 +301,22 @@ class VoiceRecognitionApp:
     def create_fresh_microphone_source(self):
         """Create a fresh microphone source to avoid context manager conflicts"""
         return sr.Microphone(sample_rate=16000)
-    
+
+    def should_filter_transcription(self, text: str) -> bool:
+        """Decide whether a transcription should be suppressed."""
+        normalized = normalize_filter_text(text or "")
+        if not normalized:
+            return True
+        if normalized in self.config.filter_list:
+            return True
+        for pattern in getattr(self.config, 'filter_patterns', []):
+            if pattern.match(normalized):
+                return True
+        words = normalized.split()
+        if normalized.startswith(('thank', 'thanks')) and len(words) <= 5:
+            return True
+        return False
+
     def record_callback(self, _, audio: sr.AudioData) -> None:
         """Optimized record callback with minimal processing"""
         if self.recording_event.is_set():
@@ -305,34 +355,55 @@ class VoiceRecognitionApp:
             self.last_activity_time = self.phrase_time
     
     def check_phrase_completion(self):
-        """Check if a phrase is complete and transcribe if needed"""
+        """Check if a phrase is complete and queue audio for transcription"""
         now = datetime.now(timezone.utc)
         silent_duration = now - self.phrase_time
-        
+
         if (silent_duration > timedelta(seconds=self.config.phrase_timeout) and 
             len(self.audio_buffer) > 0):
-            
-            # Add trailing silence
+
             time.sleep(self.config.trailing_silence)
-            
-            # Get any remaining audio
+
             self.process_audio_queue()
-            
-            # Transcribe the audio
-            text = self.transcribe_audio()
-            if text:
-                self.process_transcription(text)
-    
-    def transcribe_audio(self):
-        """Optimized transcription with better error handling"""
-        audio_bytes = self.audio_buffer.get_and_clear()
+
+            audio_bytes = self.audio_buffer.get_and_clear()
+            if audio_bytes:
+                self.enqueue_transcription(audio_bytes)
+
+    def enqueue_transcription(self, audio_bytes):
+        """Queue audio bytes for background transcription, dropping the oldest if needed."""
+        if not audio_bytes:
+            return
+        try:
+            self.transcription_queue.put_nowait(audio_bytes)
+        except Full:
+            try:
+                self.transcription_queue.get_nowait()
+                self.transcription_queue.task_done()
+            except Empty:
+                pass
+            else:
+                print("Transcription queue full, dropping the oldest chunk.")
+            try:
+                self.transcription_queue.put_nowait(audio_bytes)
+            except Full:
+                print("Unable to queue audio for transcription; skipping chunk.")
+        
+
+    def transcribe_audio(self, audio_bytes):
+        """Optimized transcription with better error handling."""
         if not audio_bytes:
             return ""
-        
+
         try:
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            
-            # Optimized transcription parameters
+            if audio_np.size == 0:
+                return ""
+
+            peak_amplitude = float(np.max(np.abs(audio_np)))
+            if peak_amplitude < self.config.volume_threshold:
+                return ""
+
             result = self.audio_model.transcribe(
                 audio_np,
                 fp16=(self.device == "cuda"),
@@ -343,28 +414,56 @@ class VoiceRecognitionApp:
                 compression_ratio_threshold=1.35 * self.config.threshold_adjustment,
                 condition_on_previous_text=False,
             )
-            
+
+            segments = result.get('segments') or []
+            first_segment = segments[0] if segments else None
+            no_speech_prob = None
+            if first_segment is not None:
+                no_speech_prob = first_segment.get('no_speech_prob')
+            else:
+                no_speech_prob = result.get('no_speech_prob')
+            if isinstance(no_speech_prob, (int, float)) and no_speech_prob >= self.config.no_speech_threshold:
+                return ""
+
             text = result['text'].strip()
             text = clean_sentence(text)
             text = collapse_repeated_phrases(text)
             return text
-            
+
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""
     
+    def transcription_worker_thread(self):
+        """Background worker that consumes queued audio and runs transcription."""
+        while not self.shutdown_event.is_set():
+            try:
+                audio_bytes = self.transcription_queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            try:
+                text = self.transcribe_audio(audio_bytes)
+                if text:
+                    self.process_transcription(text)
+            except Exception as e:
+                print(f"Transcription worker error: {e}")
+            finally:
+                self.transcription_queue.task_done()
+
+
     def process_transcription(self, text):
         """Process and output transcribed text"""
-        if not text or text.lower() in self.config.filter_list:
+        if self.should_filter_transcription(text):
             return
-        
+
         # Check for duplicates against recent transcriptions
         if self.transcription and is_duplicate_or_partial(text, self.transcription[-1]):
             return
-        
+
         print(f"Outputting: '{text}'")
         self.transcription.append(text)
-        pyautogui.write(text, interval=0.01)
+        pyautogui.write(text + " ", interval=0.01)
     
     def keyboard_handler_thread(self):
         """Dedicated thread for handling keyboard input"""
@@ -387,7 +486,7 @@ class VoiceRecognitionApp:
     def toggle_recording(self):
         """Toggle recording state with proper resource management"""
         self.last_activity_time = datetime.now(timezone.utc)
-        
+
         if self.recording_event.is_set():
             # Stop recording
             self.recording_event.clear()
@@ -398,29 +497,31 @@ class VoiceRecognitionApp:
                     print(f"Warning: Error stopping background listener: {e}")
                 finally:
                     self.background_listener = None
-            
+
             # Clear the source reference to ensure it's fully released
             self.source = None
-            
-            # Process final audio
-            final_text = self.transcribe_audio()
-            if final_text:
-                self.process_transcription(final_text)
-            
+
+            # Flush any remaining audio and queue it for transcription
+            self.process_audio_queue()
+            final_audio = self.audio_buffer.get_and_clear()
+            if final_audio:
+                self.enqueue_transcription(final_audio)
+
             print("Recording stopped...")
             self.update_indicator_safe(False)
-            
+
         else:
             # Start recording with a completely fresh microphone source
             self.recording_event.set()
-            self.transcription.clear()
-            self.data_queue.queue.clear()
+            self.transcription = deque(maxlen=100)
+            self._drain_queue(self.data_queue)
+            self.audio_buffer.get_and_clear()
             self.phrase_time = datetime.now(timezone.utc)
-            
+
             try:
                 # Create a fresh microphone source each time
                 self.source = self.create_fresh_microphone_source()
-                
+
                 self.background_listener = self.recorder.listen_in_background(
                     self.source,
                     self.record_callback,
@@ -526,6 +627,7 @@ class VoiceRecognitionApp:
             # Start worker threads
             threads = [
                 threading.Thread(target=self.audio_processor_thread, daemon=True),
+                threading.Thread(target=self.transcription_worker_thread, daemon=True),
                 threading.Thread(target=self.keyboard_handler_thread, daemon=True),
                 threading.Thread(target=self.inactivity_monitor_thread, daemon=True)
             ]
@@ -581,6 +683,8 @@ def main():
                         help="Extra silence to capture at the end of phrases (seconds).", type=float)
     parser.add_argument("--threshold_adjustment", default=1.0,
                         help="Adjust the model's threshold for detecting repetitions (1.0-2.0). Higher values are more aggressive in preventing loops.", type=float)
+    parser.add_argument("--no_speech_threshold", default=0.6, type=float,
+                        help="Drop transcriptions when Whisper reports a higher no-speech probability.")
     
     args = parser.parse_args()
     config = VoiceConfig(args)

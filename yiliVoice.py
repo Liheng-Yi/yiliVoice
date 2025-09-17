@@ -573,11 +573,11 @@ def main():
                         help="Energy level for mic to detect.", type=int)
     parser.add_argument("--record_timeout", default=1.5,
                         help="Length of audio buffer in seconds for each chunk.", type=float)
-    parser.add_argument("--phrase_timeout", default=0.5,
+    parser.add_argument("--phrase_timeout", default=1.0,
                         help="Silence gap (seconds) to consider a phrase ended.", type=float)
     parser.add_argument("--volume_threshold", default=0.008,
                         help="Min volume level to consider valid audio in the buffer.", type=float)
-    parser.add_argument("--trailing_silence", default=0.1, 
+    parser.add_argument("--trailing_silence", default=0.8, 
                         help="Extra silence to capture at the end of phrases (seconds).", type=float)
     parser.add_argument("--threshold_adjustment", default=1.0,
                         help="Adjust the model's threshold for detecting repetitions (1.0-2.0). Higher values are more aggressive in preventing loops.", type=float)

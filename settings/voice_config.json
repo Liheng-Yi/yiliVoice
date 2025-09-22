@@ -1,0 +1,14 @@
+{
+  "model": "medium",
+  "non_english": false,
+  "energy_threshold": 1000,
+  "record_timeout": 1.5,
+  "phrase_timeout": 1.0,
+  "volume_threshold": 0.008,
+  "no_speech_threshold": 0.6,
+  "trailing_silence": 0.8,
+  "threshold_adjustment": 1.0,
+  "inactivity_timeout": 600,
+  "selected_microphone_index": 2,
+  "timestamp": "2025-09-22T00:41:06.986494"
+}

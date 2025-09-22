@@ -1,16 +1,12 @@
 import argparse
-import os
 import numpy as np
 import speech_recognition as sr
 import whisper
 import torch
 import pyautogui
 import keyboard
-import tkinter as tk
-from tkinter import ttk
 import threading
 import time
-import re  # NEW: For regex utilities
 from collections import deque
 
 from datetime import datetime, timedelta, timezone
@@ -18,213 +14,17 @@ from queue import Queue, Empty, Full
 from time import sleep
 from sys import platform
 
-
-def clean_sentence(text):
-    """
-    Clean up final text output:
-    - Remove trailing period
-    - Capitalize the first character
-    """
-    text = text.strip()
-    if text.endswith('.'):
-        text = text[:-1]
-    return text.capitalize()
+# Import our modular components
+from settings import (
+    VoiceConfig, DebugUI,
+    create_overlay_window, update_indicator
+)
+from utils import (
+    AudioBuffer, clean_sentence, normalize_filter_text, 
+    is_duplicate_or_partial, collapse_repeated_phrases
+)
 
 
-def normalize_filter_text(text: str) -> str:
-    """Normalize a phrase for duplicate/filler checks."""
-    return re.sub(r'[^a-z0-9 ]+', ' ', text.lower()).strip()
-
-def is_duplicate_or_partial(new_text, previous_text, min_word_count=3):
-    """
-    Returns True if new_text is likely a repeated or partial repeat of previous_text.
-    More aggressive in filtering out near-duplicates.
-    """
-    if not previous_text:
-        return False
-
-    new_text_clean = new_text.lower().strip()
-    prev_text_clean = previous_text.lower().strip()
-
-    # If either is blank or extremely short
-    if len(new_text_clean) < min_word_count:
-        return True
-
-    # Check direct substring
-    if new_text_clean in prev_text_clean or prev_text_clean in new_text_clean:
-        return True
-
-    # Token overlap check
-    words_new = new_text_clean.split()
-    words_prev = prev_text_clean.split()
-    overlap_count = 0
-    for word in words_new:
-        if word in words_prev:
-            overlap_count += 1
-
-    # If more than half of new_text's words appear in previous_text in the same order,
-    # treat it as repeated or partial. Adjust threshold to taste.
-    if overlap_count >= (len(words_new) * 0.7):
-        return True
-
-    return False
-
-def create_overlay_window():
-    """
-    Creates a small top-centered overlay circle:
-      - Green when recording is active
-      - Pink when ready
-      - Red when no activity for a while (auto-shutdown mode)
-    """
-    root = tk.Tk()
-    root.title("Voice Status")
-    root.attributes('-topmost', True)
-    root.overrideredirect(True)
-    
-    canvas = tk.Canvas(root, width=20, height=20, bg='black', highlightthickness=0)
-    canvas.pack()
-    
-    # Create the indicator circle
-    indicator = canvas.create_oval(5, 5, 15, 15, fill='pink')
-    
-    # Position the window at the top center of the screen
-    screen_width = root.winfo_screenwidth()
-    root.geometry(f'20x20+{(screen_width//2)-10}+0')
-    
-    return root, canvas, indicator
-
-def update_indicator(canvas, indicator, is_recording, idle=False):
-    if idle:
-        color = 'red'  # Complete shutdown
-    else:
-        color = 'green' if is_recording else 'pink'  # Green for recording, pink for ready
-    canvas.itemconfig(indicator, fill=color)
-
-def collapse_repeated_phrases(text: str, max_occurrences: int = 1) -> str:
-    """
-    Whisper will occasionally output the *same* short sentence back-to-back in a single
-    transcription chunk (e.g. "i'm going to do it again." five times).  This utility
-    removes such immediate repetitions so that only the first `max_occurrences` are
-    retained.
-
-    The algorithm works by:
-      1. Splitting the text into sentence-like chunks on punctuation boundaries.
-      2. Walking through those chunks and keeping at most `max_occurrences` adjacent
-         duplicates (case-insensitive match).
-      3. Re-assembling and returning the cleaned text.
-    """
-    if not text:
-        return text
-
-    # Simple sentence segmentation on ., ?, ! boundaries.
-    # Keep the punctuation by using a regex capture group.
-    parts = re.split(r'( *[.!?]+ *)', text)
-    # Re-combine the sentence bodies with their trailing punctuations
-    sentences: list[str] = []
-    current = ""
-    for seg in parts:
-        if re.match(r' *[.!?]+ *', seg):
-            current += seg  # punctuation part
-            sentences.append(current.strip())
-            current = ""
-        else:
-            current += seg
-    if current.strip():
-        sentences.append(current.strip())
-
-    cleaned: list[str] = []
-    for s in sentences:
-        if not cleaned:
-            cleaned.append(s)
-            continue
-
-        # Compare ignoring case and surrounding whitespace
-        if s.strip().lower() == cleaned[-1].strip().lower():
-            # Already have this sentence right before – keep only if we have
-            # not yet reached the allowed max_occurrences.
-            duplicates = 1  # We had at least one occurrence in cleaned[-1]
-            # Count trailing identical sentences
-            for prev in reversed(cleaned):
-                if prev.strip().lower() == s.strip().lower():
-                    duplicates += 1
-                else:
-                    break
-            if duplicates <= max_occurrences:
-                cleaned.append(s)
-            # else skip adding – collapse the repetition.
-        else:
-            cleaned.append(s)
-
-    return ' '.join(cleaned)
-
-# Configuration class to centralize settings
-class VoiceConfig:
-    def __init__(self, args):
-        self.model = args.model
-        self.non_english = args.non_english
-        self.energy_threshold = args.energy_threshold
-        self.record_timeout = args.record_timeout
-        self.phrase_timeout = args.phrase_timeout
-        self.volume_threshold = args.volume_threshold
-        self.volume_threshold_raw = args.volume_threshold * 32768.0
-        self.no_speech_threshold = args.no_speech_threshold
-        self.trailing_silence = args.trailing_silence
-        self.threshold_adjustment = args.threshold_adjustment
-        self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
-        self.inactivity_timeout = 600  # 10 minutes
-
-        # Filter list - externalize this to a config file later
-        raw_filters = {
-            "i'm sorry",
-            "thanks for watching!",
-            "i'll see you next time.",
-            "i'm not gonna lie.",
-            "thank you.",
-            "thank you",
-            "thank you very much",
-            "thanks",
-            "thanks very much",
-            "thanks everyone",
-            "thank you everyone",
-            "i'm going to go get some food.",
-            "i'm going to do it again.",
-            "bye."
-        }
-        self.filter_list = {normalize_filter_text(item) for item in raw_filters}
-        self.filter_patterns = [
-            re.compile(r'^(?:thank|thanks)(?: you)?(?: so much| very much)?(?: everyone| all)?$', re.I),
-            re.compile(r'^thanks(?: for watching| for tuning in)?$', re.I),
-        ]
-
-
-class AudioBuffer:
-    """Optimized audio buffer with size limits and efficient memory management."""
-
-    def __init__(self, max_size):
-        self.max_size = max_size
-        self.buffer = bytearray()
-        self._lock = threading.Lock()
-
-    def append(self, data):
-        if not data:
-            return
-        with self._lock:
-            self.buffer.extend(data)
-            if len(self.buffer) > self.max_size:
-                excess = len(self.buffer) - self.max_size
-                del self.buffer[:excess]
-
-    def get_and_clear(self):
-        with self._lock:
-            if not self.buffer:
-                return bytes()
-            data = bytes(self.buffer)
-            self.buffer.clear()
-            return data
-
-    def __len__(self):
-        with self._lock:
-            return len(self.buffer)
 
 
 class VoiceRecognitionApp:
@@ -257,6 +57,7 @@ class VoiceRecognitionApp:
         self.root = None
         self.canvas = None
         self.indicator = None
+        self.debug_ui = None
         
     @staticmethod
     def _drain_queue(queue_obj):
@@ -300,7 +101,13 @@ class VoiceRecognitionApp:
     
     def create_fresh_microphone_source(self):
         """Create a fresh microphone source to avoid context manager conflicts"""
-        return sr.Microphone(sample_rate=16000)
+        device_index = self.config.selected_microphone_index
+        if device_index is not None:
+            print(f"Creating microphone with selected device index: {device_index}")
+            return sr.Microphone(device_index=device_index, sample_rate=16000)
+        else:
+            print("Creating microphone with system default device")
+            return sr.Microphone(sample_rate=16000)
 
     def should_filter_transcription(self, text: str) -> bool:
         """Decide whether a transcription should be suppressed."""
@@ -597,9 +404,16 @@ class VoiceRecognitionApp:
         except Exception as e:
             print(f"UI update error: {e}")
     
+    
+    def toggle_debug_window(self):
+        """Toggle the debug window visibility"""
+        if not self.debug_ui:
+            self.debug_ui = DebugUI(self)
+        self.debug_ui.toggle_debug_window()
+    
     def create_ui(self):
         """Create the UI overlay"""
-        self.root, self.canvas, self.indicator = create_overlay_window()
+        self.root, self.canvas, self.indicator = create_overlay_window(debug_callback=self.toggle_debug_window)
         self.update_indicator_safe(False)
     
     def cleanup(self):
@@ -612,6 +426,11 @@ class VoiceRecognitionApp:
         
         if self.device == "cuda":
             torch.cuda.empty_cache()
+        
+        # Clean up debug UI
+        if self.debug_ui:
+            self.debug_ui.cleanup()
+            self.debug_ui = None
         
         if self.root:
             self.root.destroy()

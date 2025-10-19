@@ -1,9 +1,9 @@
 {
   "current_device": {
     "index": 2,
-    "name": "Microphone (HD Webcam eMeet C95 (Recording)"
+    "name": "Microphone (HD Webcam eMeet C95 (Selected)"
   },
   "sample_rate": 16000,
-  "energy_threshold": 172.98269234825744,
+  "energy_threshold": 176.24872061492184,
   "dynamic_energy_threshold": false
 }

@@ -51,3 +51,4 @@ is_dup = is_duplicate_or_partial("hello", "hello world")  # True
 - **Thread-safe**: All operations are safe for multi-threaded use
 - **Robust filtering**: Advanced duplicate detection algorithms
 - **Text cleaning**: Consistent output formatting
+

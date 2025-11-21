@@ -25,7 +25,7 @@ class VoiceConfig:
         self.threshold_adjustment = args.threshold_adjustment
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
-        self.selected_microphone_index = None  # None means use system default
+        self.selected_microphone_index = 2  # Device 2 as default
 
         # Filter list - externalize this to a config file later
         raw_filters = {

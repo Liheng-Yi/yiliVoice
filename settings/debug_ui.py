@@ -18,6 +18,8 @@ class DebugUI:
         self.settings_text = None
         self.mic_selection_var = None
         self.mic_selection_combo = None
+        self.settings_edit_mode = False
+        self.edit_button = None
 
     def get_available_microphones(self):
         """Get list of available microphones for selection"""
@@ -280,8 +282,9 @@ class DebugUI:
         # Current microphone info
         ttk.Label(mic_frame, text="Current Microphone:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(10, 5))
         
-        self.mic_info_text = scrolledtext.ScrolledText(mic_frame, height=10, width=70)
+        self.mic_info_text = scrolledtext.ScrolledText(mic_frame, height=10, width=70, bg='#d4edda')
         self.mic_info_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.mic_info_text.config(state='disabled')  # Read-only
         
         # Microphone selection
         selection_frame = ttk.Frame(mic_frame)
@@ -302,11 +305,19 @@ class DebugUI:
         settings_frame = ttk.Frame(notebook)
         notebook.add(settings_frame, text="Settings")
         
-        # Settings content
-        ttk.Label(settings_frame, text="Current Configuration:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(10, 5))
+        # Settings header with edit button
+        settings_header = ttk.Frame(settings_frame)
+        settings_header.pack(fill=tk.X, pady=(10, 5))
         
-        self.settings_text = scrolledtext.ScrolledText(settings_frame, height=20, width=70)
+        ttk.Label(settings_header, text="Current Configuration:", font=("Arial", 12, "bold")).pack(side=tk.LEFT)
+        
+        self.edit_button = ttk.Button(settings_header, text="Edit", command=self.toggle_settings_edit_mode, width=8)
+        self.edit_button.pack(side=tk.RIGHT)
+        
+        self.settings_text = scrolledtext.ScrolledText(settings_frame, height=20, width=70, bg='#f8f9fa')
         self.settings_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.settings_text.config(state='disabled')  # Read-only by default
+        self.settings_edit_mode = False
         
         # Buttons frame
         buttons_frame = ttk.Frame(self.debug_window)
@@ -322,6 +333,20 @@ class DebugUI:
         # Handle window close
         self.debug_window.protocol("WM_DELETE_WINDOW", self.close_debug_window)
 
+    def toggle_settings_edit_mode(self):
+        """Toggle between edit and read-only mode for settings"""
+        if not self.settings_text:
+            return
+            
+        self.settings_edit_mode = not self.settings_edit_mode
+        
+        if self.settings_edit_mode:
+            self.settings_text.config(state='normal', bg='#fff3cd')  # Yellow tint for edit mode
+            self.edit_button.config(text="Done")
+        else:
+            self.settings_text.config(state='disabled', bg='#f8f9fa')
+            self.edit_button.config(text="Edit")
+
     def update_debug_info(self):
         """Update the debug information display"""
         if not (self.debug_window and self.debug_window.winfo_exists()):
@@ -333,7 +358,8 @@ class DebugUI:
             # Update microphone info
             mic_info = self.get_microphone_info()
             
-            # Current microphone
+            # Current microphone (temporarily enable to update content)
+            self.mic_info_text.config(state='normal')
             self.mic_info_text.delete(1.0, tk.END)
             is_recording = self.app.recording_event.is_set()
             device_status = "Active Recording Device" if is_recording else "Default Device (Ready)"
@@ -346,10 +372,13 @@ Dynamic Energy: {mic_info['dynamic_energy_threshold']}
 Recording Status: {'Active' if is_recording else 'Inactive'}
 """
             self.mic_info_text.insert(tk.END, current_info)
+            self.mic_info_text.config(state='disabled')  # Re-disable after update
             
-            # Settings info
-            self.settings_text.delete(1.0, tk.END)
-            settings_info = f"""Model: {self.app.config.model}
+            # Settings info (only update if not in edit mode)
+            if not self.settings_edit_mode:
+                self.settings_text.config(state='normal')
+                self.settings_text.delete(1.0, tk.END)
+                settings_info = f"""Model: {self.app.config.model}
 Non-English: {self.app.config.non_english}
 Energy Threshold: {self.app.config.energy_threshold}
 Record Timeout: {self.app.config.record_timeout}s
@@ -362,7 +391,8 @@ Inactivity Timeout: {self.app.config.inactivity_timeout}s
 Device: {self.app.device}
 CUDA Available: {torch.cuda.is_available()}
 """
-            self.settings_text.insert(tk.END, settings_info)
+                self.settings_text.insert(tk.END, settings_info)
+                self.settings_text.config(state='disabled')  # Re-disable after update
             
         except Exception as e:
             print(f"Error updating debug info: {e}")
@@ -383,15 +413,30 @@ CUDA Available: {torch.cuda.is_available()}
                 
                 # Show success message in debug window
                 if hasattr(self, 'settings_text') and self.settings_text:
+                    was_disabled = str(self.settings_text.cget('state')) == 'disabled'
+                    if was_disabled:
+                        self.settings_text.config(state='normal')
                     self.settings_text.insert(tk.END, f"\n\n✓ Settings saved to ./settings at {datetime.now().strftime('%H:%M:%S')}")
+                    if was_disabled:
+                        self.settings_text.config(state='disabled')
             else:
                 if hasattr(self, 'settings_text') and self.settings_text:
+                    was_disabled = str(self.settings_text.cget('state')) == 'disabled'
+                    if was_disabled:
+                        self.settings_text.config(state='normal')
                     self.settings_text.insert(tk.END, f"\n\n✗ Error saving settings")
+                    if was_disabled:
+                        self.settings_text.config(state='disabled')
                 
         except Exception as e:
             print(f"Error saving settings: {e}")
             if hasattr(self, 'settings_text') and self.settings_text:
+                was_disabled = str(self.settings_text.cget('state')) == 'disabled'
+                if was_disabled:
+                    self.settings_text.config(state='normal')
                 self.settings_text.insert(tk.END, f"\n\n✗ Error saving settings: {e}")
+                if was_disabled:
+                    self.settings_text.config(state='disabled')
 
     def cleanup(self):
         """Clean up debug UI resources"""

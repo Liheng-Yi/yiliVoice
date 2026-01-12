@@ -27,6 +27,13 @@ def create_overlay_window(debug_callback=None):
     screen_width = root.winfo_screenwidth()
     root.geometry(f'20x20+{(screen_width//2)-10}+0')
     
+    def keep_on_top():
+        root.lift()
+        root.attributes('-topmost', True)
+        root.after(1000, keep_on_top)  # Check every second
+    
+    keep_on_top()
+    
     return root, canvas, indicator
 
 

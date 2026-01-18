@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
 import speech_recognition as sr
-import whisper
+from faster_whisper import WhisperModel
 import torch
 import pyautogui
 import keyboard
@@ -78,10 +78,17 @@ class VoiceRecognitionApp:
             self.device = "cpu"
             print("CUDA not available, using CPU")
         
-        print("Loading Whisper model...")
+        print("Loading Faster Whisper model...")
         # Use the model specified in config
         model_name = f"{self.config.model}.en" if not self.config.non_english else self.config.model
-        self.audio_model = whisper.load_model(model_name, device=self.device)
+        
+        # Determine compute type based on device
+        if self.device == "cuda":
+            compute_type = "float16"
+        else:
+            compute_type = "int8"
+            
+        self.audio_model = WhisperModel(model_name, device=self.device, compute_type=compute_type)
         print(f"Model loaded on {self.device}")
     
     def initialize_audio(self):
@@ -211,28 +218,26 @@ class VoiceRecognitionApp:
             if peak_amplitude < self.config.volume_threshold:
                 return ""
 
-            result = self.audio_model.transcribe(
+            segments, info = self.audio_model.transcribe(
                 audio_np,
-                fp16=(self.device == "cuda"),
                 language="en" if not self.config.non_english else None,
                 temperature=0.0,
-                best_of=1,
                 beam_size=5,
                 compression_ratio_threshold=1.35 * self.config.threshold_adjustment,
                 condition_on_previous_text=False,
+                vad_filter=True, # Enable built-in VAD
+                vad_parameters=dict(min_silence_duration_ms=500)
             )
 
-            segments = result.get('segments') or []
-            first_segment = segments[0] if segments else None
-            no_speech_prob = None
-            if first_segment is not None:
-                no_speech_prob = first_segment.get('no_speech_prob')
-            else:
-                no_speech_prob = result.get('no_speech_prob')
-            if isinstance(no_speech_prob, (int, float)) and no_speech_prob >= self.config.no_speech_threshold:
+            segments = list(segments)
+            if not segments:
                 return ""
 
-            text = result['text'].strip()
+            # Check no_speech_prob (using the first segment as proxy if needed, or rely on VAD)
+            if segments[0].no_speech_prob >= self.config.no_speech_threshold:
+                return ""
+
+            text = " ".join([s.text for s in segments]).strip()
             text = clean_sentence(text)
             text = collapse_repeated_phrases(text)
             return text

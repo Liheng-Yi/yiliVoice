@@ -1,0 +1,47 @@
+{
+  "_comment": "Edit this file to customize word/phrase filtering. All matching is case-insensitive.",
+
+  "filler_words": [
+    "um", "uh", "uhh", "uhhh",
+    "em", "emm", "emmm", "emmmm",
+    "hmm", "hmmm", "hmmmm",
+    "err", "errr",
+    "erm", "ermm",
+    "ah", "ahh", "ahhh",
+    "oh", "ohh", "ohhh",
+    "eh", "ehh",
+    "like",
+    "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "basically",
+    "literally",
+    "actually",
+    "so",
+    "well",
+    "right",
+    "okay so",
+    "alright so",
+    "anyway"
+  ],
+
+  "competitive_words": [
+    "chatgpt", "chat gpt",
+    "openai", "open ai",
+    "gpt-4", "gpt4", "gpt 4",
+    "gpt-3", "gpt3", "gpt 3",
+    "google bard", "bard",
+    "gemini",
+    "copilot", "github copilot",
+    "microsoft copilot",
+    "claude", "anthropic",
+    "llama", "meta ai",
+    "mistral",
+    "perplexity",
+    "jasper",
+    "midjourney",
+    "stable diffusion",
+    "dall-e", "dalle"
+  ]
+}

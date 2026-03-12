@@ -20,6 +20,67 @@ def normalize_filter_text(text: str) -> str:
     return re.sub(r'[^a-z0-9 ]+', ' ', text.lower()).strip()
 
 
+# --------------------------------------------------------------------------- #
+# Filler-word stripping                                                        #
+# --------------------------------------------------------------------------- #
+
+def strip_filler_words(text: str, filler_pattern: re.Pattern) -> str:
+    """Remove inline filler words/disfluencies from *text*.
+
+    The filler words are stripped at word boundaries so real words that
+    happen to contain a filler as a sub-string (e.g. "umbrella") are left
+    intact.  Multiple consecutive spaces introduced by removal are collapsed
+    back to a single space, and the result is re-capitalized.
+
+    Args:
+        text: The transcribed sentence.
+        filler_pattern: Pre-compiled regex built by
+            ``settings.config._build_filler_strip_pattern``.
+
+    Returns:
+        Cleaned text with fillers removed, or the original text if the
+        pattern is None / if nothing matched.
+    """
+    if not filler_pattern or not text:
+        return text
+
+    cleaned = filler_pattern.sub(' ', text)
+    # Collapse runs of whitespace and tidy punctuation artifacts
+    cleaned = re.sub(r' {2,}', ' ', cleaned).strip()
+    # Remove leading punctuation that may be left dangling (e.g. ", hello")
+    cleaned = re.sub(r'^[,;:\-\s]+', '', cleaned).strip()
+    if not cleaned:
+        return text  # nothing survived – keep original so caller can decide
+
+    # Re-capitalize after stripping may have lowered the first letter
+    return cleaned[0].upper() + cleaned[1:] if cleaned else cleaned
+
+
+# --------------------------------------------------------------------------- #
+# Competitive-word detection                                                   #
+# --------------------------------------------------------------------------- #
+
+def contains_competitive_word(text: str, competitive_pattern: re.Pattern | None) -> bool:
+    """Return True if *text* mentions any configured competitive brand/product.
+
+    Args:
+        text: The transcribed sentence (raw, before clean_sentence).
+        competitive_pattern: Pre-compiled regex built by
+            ``settings.config._build_competitive_pattern``.  Pass ``None``
+            to skip this check (returns False).
+
+    Returns:
+        True when a competitive term is detected; False otherwise.
+    """
+    if not competitive_pattern or not text:
+        return False
+    return bool(competitive_pattern.search(text))
+
+
+# --------------------------------------------------------------------------- #
+# Duplicate / partial-repeat detection                                         #
+# --------------------------------------------------------------------------- #
+
 def is_duplicate_or_partial(new_text, previous_text, min_word_count=3):
     """
     Returns True if new_text is likely a repeated or partial repeat of previous_text.
@@ -112,6 +173,10 @@ def collapse_repeated_phrases(text: str, max_occurrences: int = 1) -> str:
 
     return ' '.join(cleaned)
 
+
+# --------------------------------------------------------------------------- #
+# Audio buffer                                                                 #
+# --------------------------------------------------------------------------- #
 
 class AudioBuffer:
     """Optimized audio buffer with size limits and efficient memory management."""

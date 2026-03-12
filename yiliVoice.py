@@ -20,8 +20,9 @@ from settings import (
     create_overlay_window, update_indicator
 )
 from utils import (
-    AudioBuffer, clean_sentence, normalize_filter_text, 
-    is_duplicate_or_partial, collapse_repeated_phrases
+    AudioBuffer, clean_sentence, normalize_filter_text,
+    is_duplicate_or_partial, collapse_repeated_phrases,
+    strip_filler_words, contains_competitive_word,
 )
 
 
@@ -117,7 +118,15 @@ class VoiceRecognitionApp:
             return sr.Microphone(sample_rate=16000)
 
     def should_filter_transcription(self, text: str) -> bool:
-        """Decide whether a transcription should be suppressed."""
+        """Decide whether a transcription should be suppressed.
+
+        A transcription is suppressed when it:
+        1. Is empty after normalization.
+        2. Exactly matches an entry in the legacy filter_list.
+        3. Matches one of the legacy filter_patterns (e.g. thank-you variants).
+        4. Is a bare "thank you" variant with ≤5 words.
+        5. Contains a *competitive* product or brand name.
+        """
         normalized = normalize_filter_text(text or "")
         if not normalized:
             return True
@@ -128,6 +137,10 @@ class VoiceRecognitionApp:
                 return True
         words = normalized.split()
         if normalized.startswith(('thank', 'thanks')) and len(words) <= 5:
+            return True
+        # ----- Competitive word check -----
+        if contains_competitive_word(text, getattr(self.config, '_competitive_pattern', None)):
+            print(f"[Filter] Competitive term detected – suppressing: '{text}'")
             return True
         return False
 
@@ -240,6 +253,12 @@ class VoiceRecognitionApp:
             text = " ".join([s.text for s in segments]).strip()
             text = clean_sentence(text)
             text = collapse_repeated_phrases(text)
+            # Strip inline filler/stopping words (e.g. "emmm", "uh", "you know")
+            filler_pattern = getattr(self.config, '_filler_strip_pattern', None)
+            stripped = strip_filler_words(text, filler_pattern)
+            if stripped and stripped != text:
+                print(f"[Filter] Filler stripped: '{text}' → '{stripped}'")
+            text = stripped if stripped else text
             return text
 
         except Exception as e:

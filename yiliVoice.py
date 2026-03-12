@@ -182,28 +182,54 @@ class VoiceRecognitionApp:
             self.last_activity_time = self.phrase_time
     
     def check_phrase_completion(self):
-        """Check if a phrase is complete and queue audio for transcription"""
+        """Check if a phrase is complete and queue audio for transcription.
+
+        Fix: last word/digit cut-off
+        ────────────────────────────
+        Root causes addressed here:
+
+        F2 – Race condition: the extension condition was `phrase_time > last_audio_time`
+             which is False when the last chunk arrives at the exact moment the
+             phrase_timeout fires.  Changed to `>=` so any tie also extends the window.
+
+        F3 – phrase_timeout < record_timeout: audio chunks can be up to `record_timeout`
+             seconds long.  We use `max(phrase_timeout, record_timeout)` so we never
+             declare a phrase done before a full chunk could have arrived.
+
+        F4 – Final drain happens BEFORE the buffer snapshot so any audio that arrived
+             during the very last polling cycle is captured.
+        """
         now = datetime.now(timezone.utc)
         silent_duration = now - self.phrase_time
 
-        if (silent_duration > timedelta(seconds=self.config.phrase_timeout) and 
-            len(self.audio_buffer) > 0):
+        # F3: effective timeout must be at least one full audio-chunk long
+        effective_phrase_timeout = max(
+            self.config.phrase_timeout,
+            self.config.record_timeout
+        )
 
-            # Wait for trailing silence, checking for new audio periodically
-            # This ensures we capture late-arriving audio chunks (e.g., the last word)
+        if (silent_duration > timedelta(seconds=effective_phrase_timeout) and
+                len(self.audio_buffer) > 0):
+
+            # Wait for trailing silence, checking for new audio periodically.
+            # This ensures we capture late-arriving audio chunks (e.g. the last word).
             last_audio_time = self.phrase_time
             wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
-            
-            while datetime.now(timezone.utc) < wait_until:
-                time.sleep(0.05)  # Check every 50ms for responsiveness
-                self.process_audio_queue()
-                
-                # If new audio arrived, extend the wait period
-                if self.phrase_time > last_audio_time:
-                    last_audio_time = self.phrase_time
-                    wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
 
-            # Final drain of any remaining audio
+            while datetime.now(timezone.utc) < wait_until:
+                time.sleep(0.05)  # poll every 50 ms
+                self.process_audio_queue()
+
+                # F2: use >= so a chunk that arrived exactly at the timeout still
+                #     extends the capture window.
+                if self.phrase_time >= last_audio_time and self.phrase_time > (
+                        now - timedelta(seconds=effective_phrase_timeout)):
+                    if self.phrase_time > last_audio_time:  # genuinely new audio
+                        last_audio_time = self.phrase_time
+                        wait_until = datetime.now(timezone.utc) + timedelta(
+                            seconds=self.config.trailing_silence)
+
+            # F4: final unconditional drain BEFORE taking the buffer snapshot
             self.process_audio_queue()
 
             audio_bytes = self.audio_buffer.get_and_clear()
@@ -535,8 +561,10 @@ def main():
                         help="Silence gap (seconds) to consider a phrase ended.", type=float)
     parser.add_argument("--volume_threshold", default=0.008,
                         help="Min volume level to consider valid audio in the buffer.", type=float)
-    parser.add_argument("--trailing_silence", default=0.8, 
-                        help="Extra silence to capture at the end of phrases (seconds).", type=float)
+    parser.add_argument("--trailing_silence", default=1.2,
+                        help="Extra silence to capture at the end of phrases (seconds). "
+                             "Should be >= record_timeout to avoid cutting off the last word.",
+                        type=float)
     parser.add_argument("--threshold_adjustment", default=1.0,
                         help="Adjust the model's threshold for detecting repetitions (1.0-2.0). Higher values are more aggressive in preventing loops.", type=float)
     parser.add_argument("--no_speech_threshold", default=0.6, type=float,

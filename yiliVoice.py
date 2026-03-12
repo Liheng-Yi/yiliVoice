@@ -189,8 +189,21 @@ class VoiceRecognitionApp:
         if (silent_duration > timedelta(seconds=self.config.phrase_timeout) and 
             len(self.audio_buffer) > 0):
 
-            time.sleep(self.config.trailing_silence)
+            # Wait for trailing silence, checking for new audio periodically
+            # This ensures we capture late-arriving audio chunks (e.g., the last word)
+            last_audio_time = self.phrase_time
+            wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
+            
+            while datetime.now(timezone.utc) < wait_until:
+                time.sleep(0.05)  # Check every 50ms for responsiveness
+                self.process_audio_queue()
+                
+                # If new audio arrived, extend the wait period
+                if self.phrase_time > last_audio_time:
+                    last_audio_time = self.phrase_time
+                    wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
 
+            # Final drain of any remaining audio
             self.process_audio_queue()
 
             audio_bytes = self.audio_buffer.get_and_clear()

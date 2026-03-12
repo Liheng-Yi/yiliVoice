@@ -9,6 +9,78 @@ def normalize_filter_text(text: str) -> str:
     return re.sub(r'[^a-z0-9 ]+', ' ', text.lower()).strip()
 
 
+# ---------------------------------------------------------------------------
+# Default filter lists (used when filters.json is absent or incomplete)
+# ---------------------------------------------------------------------------
+_DEFAULT_FILLER_WORDS = [
+    "um", "uh", "uhh", "uhhh",
+    "em", "emm", "emmm", "emmmm",
+    "hmm", "hmmm", "hmmmm",
+    "err", "errr",
+    "erm", "ermm",
+    "ah", "ahh", "ahhh",
+    "oh", "ohh", "ohhh",
+    "eh", "ehh",
+    "like",
+    "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "basically",
+    "literally",
+    "actually",
+    "so",
+    "well",
+    "right",
+    "okay so",
+    "alright so",
+    "anyway",
+]
+
+_DEFAULT_COMPETITIVE_WORDS = [
+    "chatgpt", "chat gpt",
+    "openai", "open ai",
+    "gpt-4", "gpt4", "gpt 4",
+    "gpt-3", "gpt3", "gpt 3",
+    "google bard", "bard",
+    "gemini",
+    "copilot", "github copilot",
+    "microsoft copilot",
+    "claude", "anthropic",
+    "llama", "meta ai",
+    "mistral",
+    "perplexity",
+    "jasper",
+    "midjourney",
+    "stable diffusion",
+    "dall-e", "dalle",
+]
+
+
+def _load_filters(settings_dir: str = "./settings") -> dict:
+    """Load filler_words and competitive_words from filters.json.
+
+    Falls back to the built-in defaults if the file is missing or malformed.
+    """
+    filters_file = os.path.join(settings_dir, "filters.json")
+    try:
+        with open(filters_file, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        filler = data.get("filler_words", _DEFAULT_FILLER_WORDS)
+        competitive = data.get("competitive_words", _DEFAULT_COMPETITIVE_WORDS)
+        print(f"Filters loaded from {filters_file} "
+              f"({len(filler)} filler, {len(competitive)} competitive)")
+        return {"filler_words": filler, "competitive_words": competitive}
+    except FileNotFoundError:
+        print(f"filters.json not found at {filters_file}; using built-in defaults.")
+    except Exception as exc:
+        print(f"Error loading filters.json: {exc}; using built-in defaults.")
+    return {
+        "filler_words": _DEFAULT_FILLER_WORDS,
+        "competitive_words": _DEFAULT_COMPETITIVE_WORDS,
+    }
+
+
 class VoiceConfig:
     """Configuration class to centralize settings"""
     
@@ -27,7 +99,30 @@ class VoiceConfig:
         self.inactivity_timeout = 600  # 10 minutes
         self.selected_microphone_index = 2  # Device 2 as default
 
-        # Filter list - externalize this to a config file later
+        # ------------------------------------------------------------------ #
+        # Load external filter lists (filters.json)                           #
+        # ------------------------------------------------------------------ #
+        _filters = _load_filters()
+
+        # -- Filler / stopping words ----------------------------------------
+        # Stored as a set of normalized strings for O(1) whole-phrase look-ups.
+        raw_filler: list = _filters["filler_words"]
+        self.filler_words: set[str] = {normalize_filter_text(w) for w in raw_filler}
+
+        # Regex pattern: match the filler word/phrase surrounded by word
+        # boundaries (or string edges) so that "um" doesn't strip "umbrella".
+        self._filler_strip_pattern: re.Pattern = _build_filler_strip_pattern(raw_filler)
+
+        # -- Competitive words / phrases ------------------------------------
+        # A transcription is *dropped entirely* when it contains a competitive
+        # term.  Stored as a compiled regex for efficient multi-pattern match.
+        raw_competitive: list = _filters["competitive_words"]
+        self.competitive_words: list[str] = raw_competitive
+        self._competitive_pattern: re.Pattern | None = _build_competitive_pattern(raw_competitive)
+
+        # ------------------------------------------------------------------ #
+        # Legacy hard-coded filter list (whole-transcript suppression)        #
+        # ------------------------------------------------------------------ #
         raw_filters = {
             "i'm sorry",
             "thanks for watching!",
@@ -50,6 +145,10 @@ class VoiceConfig:
             re.compile(r'^thanks(?: for watching| for tuning in)?$', re.I),
         ]
 
+    # ---------------------------------------------------------------------- #
+    # Persistence helpers                                                     #
+    # ---------------------------------------------------------------------- #
+
     def to_dict(self):
         """Convert configuration to dictionary for saving"""
         return {
@@ -70,17 +169,12 @@ class VoiceConfig:
     def save_to_file(self, settings_dir="./settings"):
         """Save current settings to the settings directory"""
         try:
-            # Create settings directory if it doesn't exist
             os.makedirs(settings_dir, exist_ok=True)
-            
-            # Save to JSON file
             settings_file = os.path.join(settings_dir, "voice_config.json")
             with open(settings_file, 'w') as f:
                 json.dump(self.to_dict(), f, indent=2)
-            
             print(f"Settings saved to {settings_dir}")
             return True
-            
         except Exception as e:
             print(f"Error saving settings: {e}")
             return False
@@ -98,3 +192,31 @@ class VoiceConfig:
             except Exception as e:
                 print(f"Error loading settings: {e}")
         return None
+
+
+# --------------------------------------------------------------------------- #
+# Helper builders (module-level, re-used by VoiceConfig)                      #
+# --------------------------------------------------------------------------- #
+
+def _build_filler_strip_pattern(filler_words: list) -> re.Pattern:
+    """Build a regex that matches any filler word/phrase at a word boundary.
+
+    Longer phrases are placed first so they take priority over shorter ones
+    (e.g. "you know" before "you").
+    """
+    sorted_words = sorted(filler_words, key=len, reverse=True)
+    escaped = [re.escape(w) for w in sorted_words]
+    # \\b works for single-word fillers; for multi-word phrases we wrap with
+    # (?<!\w) / (?!\w) look-arounds which work across the whole phrase.
+    pattern = r'(?<![a-z0-9])(?:' + '|'.join(escaped) + r')(?![a-z0-9])'
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _build_competitive_pattern(competitive_words: list) -> re.Pattern | None:
+    """Build a regex that detects any competitive brand/product name."""
+    if not competitive_words:
+        return None
+    sorted_words = sorted(competitive_words, key=len, reverse=True)
+    escaped = [re.escape(w) for w in sorted_words]
+    pattern = r'(?<![a-z0-9])(?:' + '|'.join(escaped) + r')(?![a-z0-9])'
+    return re.compile(pattern, re.IGNORECASE)

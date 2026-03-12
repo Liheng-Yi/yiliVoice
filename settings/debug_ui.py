@@ -20,6 +20,8 @@ class DebugUI:
         self.mic_selection_combo = None
         self.settings_edit_mode = False
         self.edit_button = None
+        self._filler_text = None
+        self._competitive_text = None
 
     def get_available_microphones(self):
         """Get list of available microphones for selection"""
@@ -301,6 +303,11 @@ class DebugUI:
         # Populate microphone dropdown
         self.refresh_microphone_list()
         
+        # Filters tab
+        filters_frame = ttk.Frame(notebook)
+        notebook.add(filters_frame, text="Filters")
+        self._build_filters_tab(filters_frame)
+
         # Settings tab
         settings_frame = ttk.Frame(notebook)
         notebook.add(settings_frame, text="Settings")
@@ -332,6 +339,74 @@ class DebugUI:
         
         # Handle window close
         self.debug_window.protocol("WM_DELETE_WINDOW", self.close_debug_window)
+
+    # ---------------------------------------------------------------------- #
+    # Filters tab                                                             #
+    # ---------------------------------------------------------------------- #
+
+    def _build_filters_tab(self, parent: tk.Frame):
+        """Create the Filters tab content."""
+        # ---- header ----
+        header_frame = ttk.Frame(parent)
+        header_frame.pack(fill=tk.X, pady=(10, 2), padx=6)
+        ttk.Label(header_frame, text="Active Filters  (edit settings/filters.json to change)",
+                  font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Button(header_frame, text="Reload", width=8,
+                   command=self._reload_filters_tab).pack(side=tk.RIGHT)
+
+        # ---- filler words ----
+        ttk.Label(parent, text="Filler / Stopping Words  (stripped inline from output):",
+                  font=("Arial", 10)).pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self._filler_text = scrolledtext.ScrolledText(parent, height=7, width=70, bg="#e8f4fd")
+        self._filler_text.pack(fill=tk.X, padx=6, pady=(0, 8))
+        self._filler_text.config(state="disabled")
+
+        # ---- competitive words ----
+        ttk.Label(parent, text="Competitive Words / Phrases  (whole transcription suppressed):",
+                  font=("Arial", 10)).pack(anchor=tk.W, padx=6, pady=(2, 2))
+        self._competitive_text = scrolledtext.ScrolledText(parent, height=7, width=70, bg="#fde8e8")
+        self._competitive_text.pack(fill=tk.X, padx=6, pady=(0, 8))
+        self._competitive_text.config(state="disabled")
+
+        self._populate_filters_tab()
+
+    def _populate_filters_tab(self):
+        """Fill in current filler/competitive word lists from the app config."""
+        config = self.app.config
+
+        # Filler words
+        filler = sorted(getattr(config, "filler_words", set()))
+        filler_text = "  •  ".join(filler) if filler else "(none loaded)"
+        self._filler_text.config(state="normal")
+        self._filler_text.delete(1.0, tk.END)
+        self._filler_text.insert(tk.END, filler_text)
+        self._filler_text.config(state="disabled")
+
+        # Competitive words
+        competitive = getattr(config, "competitive_words", [])
+        comp_text = "  •  ".join(competitive) if competitive else "(none loaded)"
+        self._competitive_text.config(state="normal")
+        self._competitive_text.delete(1.0, tk.END)
+        self._competitive_text.insert(tk.END, comp_text)
+        self._competitive_text.config(state="disabled")
+
+    def _reload_filters_tab(self):
+        """Reload filters.json and refresh the tab display."""
+        try:
+            from settings.config import _load_filters, _build_filler_strip_pattern, _build_competitive_pattern
+            filters = _load_filters()
+            raw_filler = filters["filler_words"]
+            raw_competitive = filters["competitive_words"]
+
+            self.app.config.filler_words = {w.lower().strip() for w in raw_filler}
+            self.app.config._filler_strip_pattern = _build_filler_strip_pattern(raw_filler)
+            self.app.config.competitive_words = raw_competitive
+            self.app.config._competitive_pattern = _build_competitive_pattern(raw_competitive)
+
+            self._populate_filters_tab()
+            print("[Debug UI] Filters reloaded from filters.json")
+        except Exception as exc:
+            print(f"[Debug UI] Error reloading filters: {exc}")
 
     def toggle_settings_edit_mode(self):
         """Toggle between edit and read-only mode for settings"""

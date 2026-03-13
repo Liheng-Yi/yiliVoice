@@ -14,6 +14,7 @@ from queue import Queue, Empty, Full
 from time import sleep
 from sys import platform
 
+
 # Import our modular components
 from settings import (
     VoiceConfig, DebugUI,
@@ -23,6 +24,7 @@ from utils import (
     AudioBuffer, clean_sentence, normalize_filter_text,
     is_duplicate_or_partial, collapse_repeated_phrases,
     strip_filler_words, contains_competitive_word,
+    VoiceConverter, SOUNDDEVICE_AVAILABLE,
 )
 
 
@@ -53,6 +55,12 @@ class VoiceRecognitionApp:
         self.phrase_time = datetime.now(timezone.utc)
         self.last_activity_time = datetime.now(timezone.utc)
         self.last_shortkey_time = datetime.now(timezone.utc) - timedelta(seconds=1)  # Initialize to allow immediate first press
+        
+        # Voice converter (real-time pitch shift → virtual cable)
+        self.voice_converter = None
+        self.last_vc_toggle_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.last_vc_route_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+
         
         # UI
         self.root = None
@@ -254,7 +262,9 @@ class VoiceRecognitionApp:
                 self.transcription_queue.put_nowait(audio_bytes)
             except Full:
                 print("Unable to queue audio for transcription; skipping chunk.")
-        
+
+
+
 
     def transcribe_audio(self, audio_bytes):
         """Optimized transcription with better error handling."""
@@ -335,21 +345,77 @@ class VoiceRecognitionApp:
         self.transcription.append(text)
         pyautogui.write(text + " ", interval=0.01)
     
+    def initialize_voice_converter(self):
+        """Create the voice converter instance (does not start streaming)."""
+        if not SOUNDDEVICE_AVAILABLE:
+            print("[VoiceConverter] sounddevice not installed — voice changer disabled.")
+            print("[VoiceConverter] Install with:  pip install sounddevice")
+            return
+
+        cables = VoiceConverter.find_virtual_cables()
+        output_dev = cables[0][0] if cables else None
+
+        if output_dev is None:
+            print(
+                "[VoiceConverter] No virtual audio cable detected.\n"
+                "  Install VB-CABLE (https://vb-audio.com/Cable/) then restart.\n"
+                "  In your game, set microphone to the virtual cable output."
+            )
+
+        self.voice_converter = VoiceConverter(
+            input_device=self.config.selected_microphone_index,
+            output_device=output_dev,
+            pitch_semitones=7,
+            sample_rate=48000,
+            block_size=1024,
+        )
+
+    def toggle_voice_converter(self):
+        """Toggle the real-time voice converter on/off."""
+        if self.voice_converter is None:
+            print("[VoiceConverter] Not available (sounddevice or virtual cable missing)")
+            return
+        is_on = self.voice_converter.toggle()
+        state = "ON" if is_on else "OFF"
+        print(f"[VoiceConverter] {state}")
+
+    def toggle_voice_converter_routing(self):
+        """Toggle the voice converter between virtual cable and actual speakers."""
+        if self.voice_converter is None:
+            print("[VoiceConverter] Not available")
+            return
+        is_speaker = self.voice_converter.toggle_routing()
+        
     def keyboard_handler_thread(self):
+
         """Dedicated thread for handling keyboard input"""
         while not self.shutdown_event.is_set():
             try:
                 if keyboard.is_pressed('ctrl+f8'):
-                    # Check cooldown period - must wait 0.5 seconds between presses
                     now = datetime.now(timezone.utc)
                     time_since_last_press = (now - self.last_shortkey_time).total_seconds()
                     
                     if time_since_last_press >= 0.5:
                         self.last_shortkey_time = now
                         self.toggle_recording()
-                        time.sleep(0.2)  # Wait for key release to prevent multiple detections
-                    
-                time.sleep(0.02)  # Reduced polling interval for faster response
+                        time.sleep(0.2)
+
+                if keyboard.is_pressed('ctrl+f9'):
+                    now = datetime.now(timezone.utc)
+                    if (now - self.last_vc_toggle_time).total_seconds() >= 0.5:
+                        self.last_vc_toggle_time = now
+                        self.toggle_voice_converter()
+                        time.sleep(0.2)
+
+                if keyboard.is_pressed('ctrl+f10'):
+                    now = datetime.now(timezone.utc)
+                    if (now - self.last_vc_route_time).total_seconds() >= 0.5:
+                        self.last_vc_route_time = now
+                        self.toggle_voice_converter_routing()
+                        time.sleep(0.2)
+
+                time.sleep(0.02)
+
             except Exception as e:
                 print(f"Keyboard handler error: {e}")
     
@@ -484,6 +550,9 @@ class VoiceRecognitionApp:
         print("Cleaning up resources...")
         self.shutdown_event.set()
         
+        if self.voice_converter and self.voice_converter.running:
+            self.voice_converter.stop()
+        
         if self.background_listener:
             self.background_listener(wait_for_stop=False)
         
@@ -504,6 +573,7 @@ class VoiceRecognitionApp:
             # Initialize components
             self.initialize_model()
             self.initialize_audio()
+            self.initialize_voice_converter()
             self.create_ui()
             
             # Start worker threads
@@ -517,7 +587,11 @@ class VoiceRecognitionApp:
             for thread in threads:
                 thread.start()
             
-            print("Voice recognition system ready. Press Ctrl+F8 to toggle recording.")
+            print("Voice recognition system ready.")
+            print("  Ctrl+F8   Toggle speech-to-text recording")
+            print("  Ctrl+F9   Toggle voice changer (sharp/funny)")
+            print("  Ctrl+F10  Toggle voice changer output (Virtual Cable / Speaker)")
+
             
             # Main UI loop - much more efficient than before
             while not self.shutdown_event.is_set():

@@ -6,6 +6,7 @@ import json
 import os
 import pyaudio
 from datetime import datetime
+from utils.voice_converter import VoiceConverter, SOUNDDEVICE_AVAILABLE
 
 
 class DebugUI:
@@ -22,6 +23,18 @@ class DebugUI:
         self.edit_button = None
         self._filler_text = None
         self._competitive_text = None
+        # Voice changer tab widgets
+        self._vc_status_label = None
+        self._vc_toggle_btn = None
+        self._vc_input_combo = None
+        self._vc_output_combo = None
+        self._vc_pitch_var = None
+        self._vc_pitch_label = None
+        self._vc_gain_var = None
+        self._vc_gain_label = None
+        # Volume threshold slider widgets
+        self._vol_thresh_var = None
+        self._vol_thresh_label = None
 
     def get_available_microphones(self):
         """Get list of available microphones for selection"""
@@ -302,11 +315,47 @@ class DebugUI:
         
         # Populate microphone dropdown
         self.refresh_microphone_list()
-        
+
+        # --- Volume threshold slider ---
+        vol_header = ttk.Frame(mic_frame)
+        vol_header.pack(fill=tk.X, pady=(10, 2))
+        ttk.Label(
+            vol_header, text="Volume Threshold:", font=("Arial", 10, "bold"),
+        ).pack(side=tk.LEFT)
+        self._vol_thresh_label = ttk.Label(
+            vol_header,
+            text=f"{self.app.config.volume_threshold:.4f}",
+            width=8,
+        )
+        self._vol_thresh_label.pack(side=tk.RIGHT)
+
+        self._vol_thresh_var = tk.DoubleVar(value=self.app.config.volume_threshold)
+        vol_scale = ttk.Scale(
+            mic_frame,
+            from_=0.0,
+            to=0.05,
+            variable=self._vol_thresh_var,
+            orient=tk.HORIZONTAL,
+            command=self._on_vol_thresh_change,
+        )
+        vol_scale.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(
+            mic_frame,
+            text="Lower = more sensitive (picks up quiet speech).  "
+                 "Higher = ignores background noise.",
+            font=("Arial", 8),
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 6))
+
         # Filters tab
         filters_frame = ttk.Frame(notebook)
         notebook.add(filters_frame, text="Filters")
         self._build_filters_tab(filters_frame)
+
+        # Voice Changer tab
+        vc_frame = ttk.Frame(notebook)
+        notebook.add(vc_frame, text="Voice Changer")
+        self._build_voice_changer_tab(vc_frame)
 
         # Settings tab
         settings_frame = ttk.Frame(notebook)
@@ -339,6 +388,201 @@ class DebugUI:
         
         # Handle window close
         self.debug_window.protocol("WM_DELETE_WINDOW", self.close_debug_window)
+
+    # ---------------------------------------------------------------------- #
+    # Voice Changer tab                                                       #
+    # ---------------------------------------------------------------------- #
+
+    def _build_voice_changer_tab(self, parent: tk.Frame):
+        """Build the Voice Changer control panel."""
+        if not SOUNDDEVICE_AVAILABLE:
+            ttk.Label(
+                parent,
+                text="sounddevice not installed.\nRun: pip install sounddevice",
+                font=("Arial", 11),
+            ).pack(pady=40)
+            return
+
+        # --- Status + toggle ---
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X, padx=10, pady=(10, 4))
+
+        self._vc_status_label = ttk.Label(top, text="OFF", font=("Arial", 12, "bold"))
+        self._vc_status_label.pack(side=tk.LEFT)
+
+        self._vc_toggle_btn = ttk.Button(
+            top, text="Start Voice Changer", width=22,
+            command=self._on_vc_toggle,
+        )
+        self._vc_toggle_btn.pack(side=tk.RIGHT)
+
+        # --- Input device ---
+        ttk.Label(parent, text="Input (your mic):", font=("Arial", 10)).pack(
+            anchor=tk.W, padx=10, pady=(8, 2)
+        )
+        self._vc_input_combo = ttk.Combobox(parent, state="readonly", width=56)
+        self._vc_input_combo.pack(fill=tk.X, padx=10)
+        self._vc_input_combo.bind("<<ComboboxSelected>>", self._on_vc_input_change)
+
+        # --- Output device (virtual cable) ---
+        ttk.Label(
+            parent,
+            text="Output (virtual cable → game mic):",
+            font=("Arial", 10),
+        ).pack(anchor=tk.W, padx=10, pady=(8, 2))
+        self._vc_output_combo = ttk.Combobox(parent, state="readonly", width=56)
+        self._vc_output_combo.pack(fill=tk.X, padx=10)
+        self._vc_output_combo.bind("<<ComboboxSelected>>", self._on_vc_output_change)
+
+        # --- Pitch slider ---
+        pitch_frame = ttk.Frame(parent)
+        pitch_frame.pack(fill=tk.X, padx=10, pady=(12, 0))
+        ttk.Label(pitch_frame, text="Pitch (semitones):", font=("Arial", 10)).pack(
+            side=tk.LEFT
+        )
+        self._vc_pitch_label = ttk.Label(pitch_frame, text="+7", width=5)
+        self._vc_pitch_label.pack(side=tk.RIGHT)
+
+        self._vc_pitch_var = tk.DoubleVar(value=7.0)
+        pitch_scale = ttk.Scale(
+            parent, from_=-12, to=12, variable=self._vc_pitch_var,
+            orient=tk.HORIZONTAL, command=self._on_vc_pitch_change,
+        )
+        pitch_scale.pack(fill=tk.X, padx=10)
+
+        # --- Gain slider ---
+        gain_frame = ttk.Frame(parent)
+        gain_frame.pack(fill=tk.X, padx=10, pady=(8, 0))
+        ttk.Label(gain_frame, text="Gain:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self._vc_gain_label = ttk.Label(gain_frame, text="1.0", width=5)
+        self._vc_gain_label.pack(side=tk.RIGHT)
+
+        self._vc_gain_var = tk.DoubleVar(value=1.0)
+        gain_scale = ttk.Scale(
+            parent, from_=0.0, to=2.0, variable=self._vc_gain_var,
+            orient=tk.HORIZONTAL, command=self._on_vc_gain_change,
+        )
+        gain_scale.pack(fill=tk.X, padx=10)
+
+        # --- Setup hint ---
+        hint = (
+            "Setup:  Install VB-CABLE  (https://vb-audio.com/Cable/)\n"
+            "1. Select your real mic as Input above\n"
+            "2. Select CABLE Input as Output above\n"
+            "3. In your game, set microphone to CABLE Output"
+        )
+        ttk.Label(parent, text=hint, font=("Arial", 9), foreground="gray").pack(
+            anchor=tk.W, padx=10, pady=(16, 4)
+        )
+
+        self._populate_vc_devices()
+
+    def _populate_vc_devices(self):
+        """Fill input/output device dropdowns and select sensible defaults.
+
+        The output list only shows virtual-cable / non-speaker devices so
+        audio never accidentally goes to the user's speakers.
+        """
+        vc = self.app.voice_converter
+        if not vc:
+            return
+
+        inputs = VoiceConverter.get_input_devices()
+        outputs = VoiceConverter.get_output_devices()
+
+        in_names = [f"[{i}] {n}" for i, n in inputs]
+
+        speaker_kw = ("speaker", "headphone", "earphone", "realtek", "hd audio")
+        cable_outputs = [
+            (i, n) for i, n in outputs
+            if not any(kw in n.lower() for kw in speaker_kw)
+        ]
+        if not cable_outputs:
+            cable_outputs = outputs
+        out_names = [f"[{i}] {n}" for i, n in cable_outputs]
+
+        self._vc_input_combo["values"] = in_names
+        self._vc_output_combo["values"] = out_names
+
+        if vc.input_device is not None:
+            for name in in_names:
+                if name.startswith(f"[{vc.input_device}]"):
+                    self._vc_input_combo.set(name)
+                    break
+        elif in_names:
+            self._vc_input_combo.set(in_names[0])
+
+        if vc.output_device is not None:
+            for name in out_names:
+                if name.startswith(f"[{vc.output_device}]"):
+                    self._vc_output_combo.set(name)
+                    break
+        else:
+            cables = VoiceConverter.find_virtual_cables()
+            if cables:
+                for name in out_names:
+                    if name.startswith(f"[{cables[0][0]}]"):
+                        self._vc_output_combo.set(name)
+                        break
+
+    def _parse_device_index(self, combo_value):
+        """Extract device index from '[idx] name' combo string."""
+        try:
+            return int(combo_value.split("]")[0][1:])
+        except (ValueError, IndexError):
+            return None
+
+    def _on_vc_toggle(self):
+        vc = self.app.voice_converter
+        if not vc:
+            return
+        is_on = vc.toggle()
+        self._vc_status_label.config(text="ON" if is_on else "OFF")
+        self._vc_toggle_btn.config(
+            text="Stop Voice Changer" if is_on else "Start Voice Changer"
+        )
+
+    def _on_vc_input_change(self, event=None):
+        vc = self.app.voice_converter
+        if not vc:
+            return
+        idx = self._parse_device_index(self._vc_input_combo.get())
+        if idx is not None:
+            vc.set_devices(input_device=idx)
+
+    def _on_vc_output_change(self, event=None):
+        vc = self.app.voice_converter
+        if not vc:
+            return
+        idx = self._parse_device_index(self._vc_output_combo.get())
+        if idx is not None:
+            vc.set_devices(output_device=idx)
+
+    def _on_vc_pitch_change(self, value=None):
+        vc = self.app.voice_converter
+        if not vc:
+            return
+        semitones = round(self._vc_pitch_var.get())
+        self._vc_pitch_label.config(text=f"{semitones:+d}")
+        vc.set_pitch(semitones)
+
+    def _on_vc_gain_change(self, value=None):
+        vc = self.app.voice_converter
+        if not vc:
+            return
+        gain = round(self._vc_gain_var.get(), 1)
+        self._vc_gain_label.config(text=f"{gain:.1f}")
+        vc.set_gain(gain)
+
+    # ---------------------------------------------------------------------- #
+    # Volume threshold                                                        #
+    # ---------------------------------------------------------------------- #
+
+    def _on_vol_thresh_change(self, value=None):
+        val = self._vol_thresh_var.get()
+        val = round(val, 4)
+        self._vol_thresh_label.config(text=f"{val:.4f}")
+        self.app.config.volume_threshold = val
 
     # ---------------------------------------------------------------------- #
     # Filters tab                                                             #

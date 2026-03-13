@@ -8,6 +8,7 @@ from .audio_utils import (
     strip_filler_words,
     contains_competitive_word,
 )
+from .voice_converter import VoiceConverter, SOUNDDEVICE_AVAILABLE
 
 __all__ = [
     'AudioBuffer',
@@ -17,4 +18,6 @@ __all__ = [
     'collapse_repeated_phrases',
     'strip_filler_words',
     'contains_competitive_word',
+    'VoiceConverter',
+    'SOUNDDEVICE_AVAILABLE',
 ]

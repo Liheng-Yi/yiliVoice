@@ -391,7 +391,7 @@ class VoiceRecognitionApp:
         """Dedicated thread for handling keyboard input"""
         while not self.shutdown_event.is_set():
             try:
-                if keyboard.is_pressed('ctrl+f8'):
+                if keyboard.is_pressed('pause'):
                     now = datetime.now(timezone.utc)
                     time_since_last_press = (now - self.last_shortkey_time).total_seconds()
                     
@@ -498,7 +498,7 @@ class VoiceRecognitionApp:
                 
                 # Wait for activity
                 while inactive_time > self.config.inactivity_timeout:
-                    if keyboard.is_pressed('ctrl+f8'):
+                    if keyboard.is_pressed('pause'):
                         self.last_activity_time = datetime.now(timezone.utc)
                         
                         # Optional: Reload model if it was unloaded (uncomment if using unloading above)
@@ -588,7 +588,7 @@ class VoiceRecognitionApp:
                 thread.start()
             
             print("Voice recognition system ready.")
-            print("  Ctrl+F8   Toggle speech-to-text recording")
+            print("  Pause/Break   Toggle speech-to-text recording")
             print("  Ctrl+F9   Toggle voice changer (sharp/funny)")
             print("  Ctrl+F10  Toggle voice changer output (Virtual Cable / Speaker)")
 

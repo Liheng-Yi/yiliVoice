@@ -7,6 +7,7 @@ import pyautogui
 import keyboard
 import threading
 import time
+import tkinter as tk
 from collections import deque
 
 from datetime import datetime, timedelta, timezone
@@ -23,7 +24,7 @@ from settings import (
 from utils import (
     AudioBuffer, clean_sentence, normalize_filter_text,
     is_duplicate_or_partial, collapse_repeated_phrases,
-    strip_filler_words, contains_competitive_word,
+    strip_filler_words,
     VoiceConverter, SOUNDDEVICE_AVAILABLE,
 )
 
@@ -132,8 +133,7 @@ class VoiceRecognitionApp:
         1. Is empty after normalization.
         2. Exactly matches an entry in the legacy filter_list.
         3. Matches one of the legacy filter_patterns (e.g. thank-you variants).
-        4. Is a bare "thank you" variant with ≤5 words.
-        5. Contains a *competitive* product or brand name.
+        4. Is a bare "thank you" variant with <=5 words.
         """
         normalized = normalize_filter_text(text or "")
         if not normalized:
@@ -145,10 +145,6 @@ class VoiceRecognitionApp:
                 return True
         words = normalized.split()
         if normalized.startswith(('thank', 'thanks')) and len(words) <= 5:
-            return True
-        # ----- Competitive word check -----
-        if contains_competitive_word(text, getattr(self.config, '_competitive_pattern', None)):
-            print(f"[Filter] Competitive term detected – suppressing: '{text}'")
             return True
         return False
 

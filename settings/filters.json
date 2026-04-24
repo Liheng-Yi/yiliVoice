@@ -24,24 +24,5 @@
     "okay so",
     "alright so",
     "anyway"
-  ],
-
-  "competitive_words": [
-    "chatgpt", "chat gpt",
-    "openai", "open ai",
-    "gpt-4", "gpt4", "gpt 4",
-    "gpt-3", "gpt3", "gpt 3",
-    "google bard", "bard",
-    "gemini",
-    "copilot", "github copilot",
-    "microsoft copilot",
-    "claude", "anthropic",
-    "llama", "meta ai",
-    "mistral",
-    "perplexity",
-    "jasper",
-    "midjourney",
-    "stable diffusion",
-    "dall-e", "dalle"
   ]
 }

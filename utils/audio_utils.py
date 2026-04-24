@@ -57,27 +57,6 @@ def strip_filler_words(text: str, filler_pattern: re.Pattern) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Competitive-word detection                                                   #
-# --------------------------------------------------------------------------- #
-
-def contains_competitive_word(text: str, competitive_pattern: re.Pattern | None) -> bool:
-    """Return True if *text* mentions any configured competitive brand/product.
-
-    Args:
-        text: The transcribed sentence (raw, before clean_sentence).
-        competitive_pattern: Pre-compiled regex built by
-            ``settings.config._build_competitive_pattern``.  Pass ``None``
-            to skip this check (returns False).
-
-    Returns:
-        True when a competitive term is detected; False otherwise.
-    """
-    if not competitive_pattern or not text:
-        return False
-    return bool(competitive_pattern.search(text))
-
-
-# --------------------------------------------------------------------------- #
 # Duplicate / partial-repeat detection                                         #
 # --------------------------------------------------------------------------- #
 

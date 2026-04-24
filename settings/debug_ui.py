@@ -1,17 +1,41 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext
-import speech_recognition as sr
-import torch
+"""Modern debug / control window built on customtkinter.
+
+Keeps the public API unchanged (``DebugUI(app).toggle_debug_window()``)
+so ``yiliVoice.py`` does not need to be modified.
+"""
+
 import json
 import os
-import pyaudio
 from datetime import datetime
+
+import customtkinter as ctk
+import pyaudio
+import speech_recognition as sr
+import torch
+
 from utils.voice_converter import VoiceConverter, SOUNDDEVICE_AVAILABLE
 
 
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+# Accent colours used across the window (subtle dark-mode panels)
+PANEL_MIC = "#1f2937"
+PANEL_FILLER = "#1e3a5f"
+PANEL_SETTINGS = "#111827"
+PANEL_SETTINGS_EDIT = "#3d3418"
+
+HEADING_FONT = ("Segoe UI", 14, "bold")
+LABEL_FONT = ("Segoe UI", 11, "bold")
+BODY_FONT = ("Segoe UI", 11)
+HINT_FONT = ("Segoe UI", 9)
+MONO_FONT = ("Consolas", 11)
+
+
 class DebugUI:
-    """Debug UI manager for yiliVoice application"""
-    
+    """Modern debug UI for the yiliVoice application."""
+
     def __init__(self, app_instance):
         self.app = app_instance
         self.debug_window = None
@@ -22,7 +46,7 @@ class DebugUI:
         self.settings_edit_mode = False
         self.edit_button = None
         self._filler_text = None
-        self._competitive_text = None
+
         # Voice changer tab widgets
         self._vc_status_label = None
         self._vc_toggle_btn = None
@@ -32,241 +56,201 @@ class DebugUI:
         self._vc_pitch_label = None
         self._vc_gain_var = None
         self._vc_gain_label = None
+
         # Volume threshold slider widgets
         self._vol_thresh_var = None
         self._vol_thresh_label = None
 
+    # ------------------------------------------------------------------ #
+    # Microphone discovery                                                #
+    # ------------------------------------------------------------------ #
+
     def get_available_microphones(self):
-        """Get list of available microphones for selection"""
+        """Return a filtered ``[(display_name, device_index), ...]`` list."""
         try:
             mic_list = []
             mic_names = sr.Microphone.list_microphone_names()
-            
-            # Filter out non-microphone devices
+
             input_keywords = ['microphone', 'mic', 'input', 'headset', 'webcam', 'broadcast']
             output_keywords = ['speaker', 'output', 'headphone', 'earphone']
-            
+
             for i, name in enumerate(mic_names):
                 name_lower = name.lower()
-                
-                # Skip obvious output devices
+
                 if any(keyword in name_lower for keyword in output_keywords):
                     continue
-                
-                # Skip generic Windows sound mappers unless they're the only option
-                if 'sound mapper' in name_lower and any(keyword in other_name.lower() for other_name in mic_names for keyword in input_keywords if other_name != name):
+
+                if 'sound mapper' in name_lower and any(
+                    keyword in other_name.lower()
+                    for other_name in mic_names
+                    for keyword in input_keywords
+                    if other_name != name
+                ):
                     continue
-                
-                # Include devices that seem like microphones
+
                 if any(keyword in name_lower for keyword in input_keywords) or 'sound mapper' in name_lower:
-                    display_name = f"[{i}] {name}"
-                    mic_list.append((display_name, i))
-            
-            # If no devices found after filtering, show all (safety fallback)
+                    mic_list.append((f"[{i}] {name}", i))
+
             if not mic_list:
                 for i, name in enumerate(mic_names):
-                    display_name = f"[{i}] {name}"
-                    mic_list.append((display_name, i))
-            
+                    mic_list.append((f"[{i}] {name}", i))
+
             return mic_list
         except Exception as e:
             print(f"Error getting available microphones: {e}")
             return [("Error getting microphones", None)]
 
-    def on_microphone_selection_change(self, event=None):
-        """Handle microphone selection change"""
+    def on_microphone_selection_change(self, selection=None):
         if not self.mic_selection_combo:
             return
-            
-        selection = self.mic_selection_combo.get()
+
+        selection = selection if selection is not None else self.mic_selection_combo.get()
         if not selection or selection.startswith("Error"):
             return
-            
+
         try:
-            # Extract device index from selection string like "[2] Microphone Name"
             device_index = int(selection.split(']')[0][1:])
             print(f"User selected microphone device index: {device_index}")
-            
-            # Update the app's selected device
+
             self.app.config.selected_microphone_index = device_index
-            
-            # If currently recording, restart recording with new device
+
             if self.app.recording_event.is_set():
                 print("Switching microphone during recording...")
-                self.app.toggle_recording()  # Stop current recording
-                # Small delay to ensure cleanup
-                self.app.root.after(500, self.app.toggle_recording)  # Restart with new device
-            
-            # Update debug display
+                self.app.toggle_recording()
+                self.app.root.after(500, self.app.toggle_recording)
+
             self.update_debug_info()
-            
+
         except (ValueError, IndexError) as e:
             print(f"Error parsing microphone selection: {e}")
 
     def refresh_microphone_list(self):
-        """Refresh the microphone selection dropdown"""
         if not self.mic_selection_combo:
             return
-            
+
         try:
             available_mics = self.get_available_microphones()
             mic_names = [mic[0] for mic in available_mics]
-            
-            self.mic_selection_combo['values'] = mic_names
-            
-            # Set current selection based on app config
+
+            self.mic_selection_combo.configure(values=mic_names)
+
             current_index = getattr(self.app.config, 'selected_microphone_index', None)
             if current_index is not None:
                 for name in mic_names:
                     if name.startswith(f"[{current_index}]"):
                         self.mic_selection_var.set(name)
                         break
-            else:
-                # Set to first item if no selection made yet
-                if mic_names:
-                    self.mic_selection_var.set(mic_names[0])
-                    
+            elif mic_names:
+                self.mic_selection_var.set(mic_names[0])
+
         except Exception as e:
             print(f"Error refreshing microphone list: {e}")
 
     def get_default_microphone_info(self):
-        """Get information about the default microphone device"""
         try:
-            # First try to get the system default device using PyAudio
             pa = pyaudio.PyAudio()
             try:
                 default_input_info = pa.get_default_input_device_info()
                 default_device_index = default_input_info['index']
                 default_device_name = default_input_info['name']
-                
-                # Map PyAudio device index to speech_recognition device index
+
                 mic_names = sr.Microphone.list_microphone_names()
-                
-                # Try to find the matching device name in speech_recognition list
+
                 for sr_index, sr_name in enumerate(mic_names):
                     if sr_name.strip() == default_device_name.strip():
-                        return {
-                            'index': sr_index,
-                            'name': default_device_name
-                        }
-                
-                # If exact match not found, return the PyAudio info
+                        return {'index': sr_index, 'name': default_device_name}
+
                 return {
                     'index': default_device_index,
-                    'name': f"{default_device_name} (Default)"
+                    'name': f"{default_device_name} (Default)",
                 }
-                
             finally:
                 pa.terminate()
-                
+
         except Exception as pa_error:
             print(f"PyAudio default device detection failed: {pa_error}")
-            
-            # Fallback to speech_recognition method
+
             try:
                 temp_mic = sr.Microphone(sample_rate=16000)
                 device_index = getattr(temp_mic, 'device_index', None)
-                
                 mic_names = sr.Microphone.list_microphone_names()
-                
+
                 if device_index is not None and isinstance(device_index, int):
                     if device_index < len(mic_names):
-                        return {
-                            'index': device_index,
-                            'name': mic_names[device_index]
-                        }
-                
-                # If we can't get specific device index, try to find the default
-                # Usually the first device in the list is the system default
+                        return {'index': device_index, 'name': mic_names[device_index]}
+
                 if mic_names:
-                    return {
-                        'index': 0,
-                        'name': f"{mic_names[0]} (System Default)"
-                    }
-                
-                # Fallback if no devices found
-                return {
-                    'index': 'none',
-                    'name': 'No Microphone Detected'
-                }
+                    return {'index': 0, 'name': f"{mic_names[0]} (System Default)"}
+
+                return {'index': 'none', 'name': 'No Microphone Detected'}
             except Exception as e:
                 print(f"Error getting default microphone info: {e}")
-                return {
-                    'index': 'error',
-                    'name': f'Error: {str(e)}'
-                }
+                return {'index': 'error', 'name': f'Error: {str(e)}'}
 
     def get_microphone_info(self):
-        """Get information about the current microphone device"""
         mic_info = {
             'current_device': None,
             'sample_rate': 16000,
             'energy_threshold': self.app.recorder.energy_threshold if self.app.recorder else None,
-            'dynamic_energy_threshold': self.app.recorder.dynamic_energy_threshold if self.app.recorder else None
+            'dynamic_energy_threshold': self.app.recorder.dynamic_energy_threshold if self.app.recorder else None,
         }
-        
+
         try:
-            
-            # Get current device info
             selected_index = self.app.config.selected_microphone_index
-            
+
             if self.app.source and self.app.recording_event.is_set():
-                # When actively recording, show the active microphone
                 device_index = getattr(self.app.source, 'device_index', None)
-                
+
                 if device_index is not None:
-                    # Use the specific device index from the active source
                     mic_names = sr.Microphone.list_microphone_names()
                     device_name = mic_names[device_index] if device_index < len(mic_names) else 'Unknown Device'
                     mic_info['current_device'] = {
                         'index': device_index,
-                        'name': f"{device_name} (Recording)"
+                        'name': f"{device_name} (Recording)",
                     }
                 else:
-                    # Fallback if device_index not found
                     default_info = self.get_default_microphone_info()
                     mic_info['current_device'] = {
                         'index': default_info['index'],
-                        'name': f"{default_info['name']} (Recording)"
+                        'name': f"{default_info['name']} (Recording)",
                     }
             else:
-                # When not recording, show the selected or default microphone
                 if selected_index is not None:
-                    # Show the user-selected microphone
                     try:
                         mic_names = sr.Microphone.list_microphone_names()
                         if selected_index < len(mic_names):
                             mic_info['current_device'] = {
                                 'index': selected_index,
-                                'name': f"{mic_names[selected_index]} (Selected)"
+                                'name': f"{mic_names[selected_index]} (Selected)",
                             }
                         else:
                             mic_info['current_device'] = {
                                 'index': selected_index,
-                                'name': f"Device {selected_index} (Invalid)"
+                                'name': f"Device {selected_index} (Invalid)",
                             }
                     except Exception as e:
                         print(f"Error getting selected microphone: {e}")
                         mic_info['current_device'] = self.get_default_microphone_info()
                 else:
-                    # No selection made, show system default
                     mic_info['current_device'] = self.get_default_microphone_info()
-                
+
         except Exception as e:
             print(f"Error getting microphone info: {e}")
             mic_info['error'] = str(e)
-        
+
         return mic_info
 
+    # ------------------------------------------------------------------ #
+    # Window lifecycle                                                    #
+    # ------------------------------------------------------------------ #
+
     def toggle_debug_window(self):
-        """Toggle the debug window visibility"""
         if self.debug_window and self.debug_window.winfo_exists():
             self.close_debug_window()
         else:
             self.create_debug_window()
 
     def close_debug_window(self):
-        """Properly close the debug window"""
         if self.debug_window:
             try:
                 self.debug_window.destroy()
@@ -276,213 +260,251 @@ class DebugUI:
                 self.debug_window = None
 
     def create_debug_window(self):
-        """Create the debug information window"""
         if self.debug_window and self.debug_window.winfo_exists():
             self.debug_window.lift()
             return
-            
-        self.debug_window = tk.Toplevel(self.app.root)
-        self.debug_window.title("yiliVoice Debug Information")
-        self.debug_window.geometry("600x500")
+
+        self.debug_window = ctk.CTkToplevel(self.app.root)
+        self.debug_window.title("yiliVoice · Debug")
+        self.debug_window.geometry("680x620")
+        self.debug_window.minsize(620, 520)
         self.debug_window.attributes('-topmost', True)
-        
-        # Create notebook for tabs
-        notebook = ttk.Notebook(self.debug_window)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Microphone tab
-        mic_frame = ttk.Frame(notebook)
-        notebook.add(mic_frame, text="Microphone")
-        
-        # Current microphone info
-        ttk.Label(mic_frame, text="Current Microphone:", font=("Arial", 12, "bold")).pack(anchor=tk.W, pady=(10, 5))
-        
-        self.mic_info_text = scrolledtext.ScrolledText(mic_frame, height=10, width=70, bg='#d4edda')
-        self.mic_info_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        self.mic_info_text.config(state='disabled')  # Read-only
-        
-        # Microphone selection
-        selection_frame = ttk.Frame(mic_frame)
-        selection_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(selection_frame, text="Select Microphone:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
-        
-        self.mic_selection_var = tk.StringVar()
-        self.mic_selection_combo = ttk.Combobox(selection_frame, textvariable=self.mic_selection_var, 
-                                               state="readonly", width=60)
-        self.mic_selection_combo.pack(fill=tk.X, pady=(5, 0))
-        self.mic_selection_combo.bind('<<ComboboxSelected>>', self.on_microphone_selection_change)
-        
-        # Populate microphone dropdown
-        self.refresh_microphone_list()
+        self.debug_window.configure(fg_color="#0f1115")
 
-        # --- Volume threshold slider ---
-        vol_header = ttk.Frame(mic_frame)
-        vol_header.pack(fill=tk.X, pady=(10, 2))
-        ttk.Label(
-            vol_header, text="Volume Threshold:", font=("Arial", 10, "bold"),
-        ).pack(side=tk.LEFT)
-        self._vol_thresh_label = ttk.Label(
-            vol_header,
-            text=f"{self.app.config.volume_threshold:.4f}",
-            width=8,
+        # ---- header -------------------------------------------------- #
+        header = ctk.CTkFrame(self.debug_window, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(14, 6))
+
+        ctk.CTkLabel(
+            header, text="yiliVoice Control Panel",
+            font=("Segoe UI", 18, "bold"),
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            header, text="live settings · no restart needed",
+            font=HINT_FONT, text_color="#6b7280",
+        ).pack(side="left", padx=(10, 0), pady=(6, 0))
+
+        # ---- tabs ---------------------------------------------------- #
+        tabview = ctk.CTkTabview(
+            self.debug_window,
+            fg_color="#151923",
+            segmented_button_fg_color="#1f2937",
+            segmented_button_selected_color="#6366f1",
+            segmented_button_selected_hover_color="#4f46e5",
         )
-        self._vol_thresh_label.pack(side=tk.RIGHT)
+        tabview.pack(fill="both", expand=True, padx=16, pady=(4, 8))
 
-        self._vol_thresh_var = tk.DoubleVar(value=self.app.config.volume_threshold)
-        vol_scale = ttk.Scale(
-            mic_frame,
-            from_=0.0,
-            to=0.05,
-            variable=self._vol_thresh_var,
-            orient=tk.HORIZONTAL,
-            command=self._on_vol_thresh_change,
-        )
-        vol_scale.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(
-            mic_frame,
-            text="Lower = more sensitive (picks up quiet speech).  "
-                 "Higher = ignores background noise.",
-            font=("Arial", 8),
-            foreground="gray",
-        ).pack(anchor=tk.W, pady=(0, 6))
+        mic_tab = tabview.add("Microphone")
+        filters_tab = tabview.add("Filters")
+        vc_tab = tabview.add("Voice Changer")
+        settings_tab = tabview.add("Settings")
 
-        # Filters tab
-        filters_frame = ttk.Frame(notebook)
-        notebook.add(filters_frame, text="Filters")
-        self._build_filters_tab(filters_frame)
+        self._build_microphone_tab(mic_tab)
+        self._build_filters_tab(filters_tab)
+        self._build_voice_changer_tab(vc_tab)
+        self._build_settings_tab(settings_tab)
 
-        # Voice Changer tab
-        vc_frame = ttk.Frame(notebook)
-        notebook.add(vc_frame, text="Voice Changer")
-        self._build_voice_changer_tab(vc_frame)
+        # ---- footer -------------------------------------------------- #
+        footer = ctk.CTkFrame(self.debug_window, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 14))
 
-        # Settings tab
-        settings_frame = ttk.Frame(notebook)
-        notebook.add(settings_frame, text="Settings")
-        
-        # Settings header with edit button
-        settings_header = ttk.Frame(settings_frame)
-        settings_header.pack(fill=tk.X, pady=(10, 5))
-        
-        ttk.Label(settings_header, text="Current Configuration:", font=("Arial", 12, "bold")).pack(side=tk.LEFT)
-        
-        self.edit_button = ttk.Button(settings_header, text="Edit", command=self.toggle_settings_edit_mode, width=8)
-        self.edit_button.pack(side=tk.RIGHT)
-        
-        self.settings_text = scrolledtext.ScrolledText(settings_frame, height=20, width=70, bg='#f8f9fa')
-        self.settings_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        self.settings_text.config(state='disabled')  # Read-only by default
-        self.settings_edit_mode = False
-        
-        # Buttons frame
-        buttons_frame = ttk.Frame(self.debug_window)
-        buttons_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        
-        ttk.Button(buttons_frame, text="Refresh", command=self.update_debug_info).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(buttons_frame, text="Save Settings", command=self.save_debug_settings).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="Close", command=self.close_debug_window).pack(side=tk.RIGHT)
-        
-        # Initial update
+        ctk.CTkButton(
+            footer, text="Refresh", width=96,
+            command=self.update_debug_info,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            footer, text="Save Settings", width=120,
+            fg_color="#16a34a", hover_color="#15803d",
+            command=self.save_debug_settings,
+        ).pack(side="left", padx=8)
+
+        ctk.CTkButton(
+            footer, text="Close", width=90,
+            fg_color="#374151", hover_color="#4b5563",
+            command=self.close_debug_window,
+        ).pack(side="right")
+
         self.update_debug_info()
-        
-        # Handle window close
+
         self.debug_window.protocol("WM_DELETE_WINDOW", self.close_debug_window)
 
-    # ---------------------------------------------------------------------- #
-    # Voice Changer tab                                                       #
-    # ---------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
+    # Microphone tab                                                      #
+    # ------------------------------------------------------------------ #
 
-    def _build_voice_changer_tab(self, parent: tk.Frame):
-        """Build the Voice Changer control panel."""
+    def _build_microphone_tab(self, parent):
+        ctk.CTkLabel(
+            parent, text="Current Microphone",
+            font=HEADING_FONT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(12, 6))
+
+        self.mic_info_text = ctk.CTkTextbox(
+            parent, height=170, fg_color=PANEL_MIC,
+            font=MONO_FONT, wrap="word", corner_radius=10,
+        )
+        self.mic_info_text.pack(fill="x", padx=12, pady=(0, 12))
+        self.mic_info_text.configure(state="disabled")
+
+        ctk.CTkLabel(
+            parent, text="Select Microphone",
+            font=LABEL_FONT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+
+        self.mic_selection_var = ctk.StringVar()
+        self.mic_selection_combo = ctk.CTkComboBox(
+            parent, variable=self.mic_selection_var,
+            values=[], state="readonly",
+            command=self.on_microphone_selection_change,
+            width=560, height=32,
+            fg_color="#1f2937", button_color="#4f46e5",
+            button_hover_color="#4338ca", border_color="#374151",
+        )
+        self.mic_selection_combo.pack(fill="x", padx=12)
+
+        self.refresh_microphone_list()
+
+        # --- Volume threshold slider ------------------------------- #
+        vol_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        vol_frame.pack(fill="x", padx=12, pady=(16, 2))
+
+        ctk.CTkLabel(vol_frame, text="Volume Threshold", font=LABEL_FONT).pack(side="left")
+        self._vol_thresh_label = ctk.CTkLabel(
+            vol_frame, text=f"{self.app.config.volume_threshold:.4f}",
+            font=BODY_FONT, text_color="#93c5fd",
+        )
+        self._vol_thresh_label.pack(side="right")
+
+        self._vol_thresh_var = ctk.DoubleVar(value=self.app.config.volume_threshold)
+        ctk.CTkSlider(
+            parent, from_=0.0, to=0.05,
+            variable=self._vol_thresh_var,
+            command=self._on_vol_thresh_change,
+            progress_color="#6366f1", button_color="#a5b4fc",
+            button_hover_color="#818cf8",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(
+            parent,
+            text="Lower = more sensitive (picks up quiet speech).  "
+                 "Higher = ignores background noise.",
+            font=HINT_FONT, text_color="#6b7280", anchor="w", justify="left",
+        ).pack(fill="x", padx=12, pady=(0, 12))
+
+    # ------------------------------------------------------------------ #
+    # Voice Changer tab                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _build_voice_changer_tab(self, parent):
         if not SOUNDDEVICE_AVAILABLE:
-            ttk.Label(
+            ctk.CTkLabel(
                 parent,
-                text="sounddevice not installed.\nRun: pip install sounddevice",
-                font=("Arial", 11),
-            ).pack(pady=40)
+                text="sounddevice not installed.\n\nRun:  pip install sounddevice",
+                font=("Segoe UI", 13), text_color="#f87171",
+                justify="center",
+            ).pack(expand=True, pady=60)
             return
 
-        # --- Status + toggle ---
-        top = ttk.Frame(parent)
-        top.pack(fill=tk.X, padx=10, pady=(10, 4))
+        # --- status + toggle ------------------------------------------ #
+        top = ctk.CTkFrame(parent, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(12, 8))
 
-        self._vc_status_label = ttk.Label(top, text="OFF", font=("Arial", 12, "bold"))
-        self._vc_status_label.pack(side=tk.LEFT)
+        self._vc_status_label = ctk.CTkLabel(
+            top, text="OFF",
+            font=("Segoe UI", 16, "bold"),
+            text_color="#f87171",
+        )
+        self._vc_status_label.pack(side="left")
 
-        self._vc_toggle_btn = ttk.Button(
-            top, text="Start Voice Changer", width=22,
+        self._vc_toggle_btn = ctk.CTkButton(
+            top, text="Start Voice Changer", width=170, height=34,
+            fg_color="#16a34a", hover_color="#15803d",
             command=self._on_vc_toggle,
         )
-        self._vc_toggle_btn.pack(side=tk.RIGHT)
+        self._vc_toggle_btn.pack(side="right")
 
-        # --- Input device ---
-        ttk.Label(parent, text="Input (your mic):", font=("Arial", 10)).pack(
-            anchor=tk.W, padx=10, pady=(8, 2)
+        # --- input device --------------------------------------------- #
+        ctk.CTkLabel(
+            parent, text="Input  (your microphone)",
+            font=LABEL_FONT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(6, 2))
+
+        self._vc_input_combo = ctk.CTkComboBox(
+            parent, values=[], state="readonly",
+            command=self._on_vc_input_change, height=32,
+            fg_color="#1f2937", button_color="#4f46e5",
+            button_hover_color="#4338ca", border_color="#374151",
         )
-        self._vc_input_combo = ttk.Combobox(parent, state="readonly", width=56)
-        self._vc_input_combo.pack(fill=tk.X, padx=10)
-        self._vc_input_combo.bind("<<ComboboxSelected>>", self._on_vc_input_change)
+        self._vc_input_combo.pack(fill="x", padx=12)
 
-        # --- Output device (virtual cable) ---
-        ttk.Label(
-            parent,
-            text="Output (virtual cable → game mic):",
-            font=("Arial", 10),
-        ).pack(anchor=tk.W, padx=10, pady=(8, 2))
-        self._vc_output_combo = ttk.Combobox(parent, state="readonly", width=56)
-        self._vc_output_combo.pack(fill=tk.X, padx=10)
-        self._vc_output_combo.bind("<<ComboboxSelected>>", self._on_vc_output_change)
+        # --- output device -------------------------------------------- #
+        ctk.CTkLabel(
+            parent, text="Output  (virtual cable → game mic)",
+            font=LABEL_FONT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 2))
 
-        # --- Pitch slider ---
-        pitch_frame = ttk.Frame(parent)
-        pitch_frame.pack(fill=tk.X, padx=10, pady=(12, 0))
-        ttk.Label(pitch_frame, text="Pitch (semitones):", font=("Arial", 10)).pack(
-            side=tk.LEFT
+        self._vc_output_combo = ctk.CTkComboBox(
+            parent, values=[], state="readonly",
+            command=self._on_vc_output_change, height=32,
+            fg_color="#1f2937", button_color="#4f46e5",
+            button_hover_color="#4338ca", border_color="#374151",
         )
-        self._vc_pitch_label = ttk.Label(pitch_frame, text="+7", width=5)
-        self._vc_pitch_label.pack(side=tk.RIGHT)
+        self._vc_output_combo.pack(fill="x", padx=12)
 
-        self._vc_pitch_var = tk.DoubleVar(value=7.0)
-        pitch_scale = ttk.Scale(
-            parent, from_=-12, to=12, variable=self._vc_pitch_var,
-            orient=tk.HORIZONTAL, command=self._on_vc_pitch_change,
+        # --- pitch slider --------------------------------------------- #
+        pitch_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        pitch_frame.pack(fill="x", padx=12, pady=(14, 0))
+
+        ctk.CTkLabel(pitch_frame, text="Pitch  (semitones)", font=LABEL_FONT).pack(side="left")
+        self._vc_pitch_label = ctk.CTkLabel(
+            pitch_frame, text="+7", font=BODY_FONT, text_color="#93c5fd",
         )
-        pitch_scale.pack(fill=tk.X, padx=10)
+        self._vc_pitch_label.pack(side="right")
 
-        # --- Gain slider ---
-        gain_frame = ttk.Frame(parent)
-        gain_frame.pack(fill=tk.X, padx=10, pady=(8, 0))
-        ttk.Label(gain_frame, text="Gain:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self._vc_gain_label = ttk.Label(gain_frame, text="1.0", width=5)
-        self._vc_gain_label.pack(side=tk.RIGHT)
+        self._vc_pitch_var = ctk.DoubleVar(value=7.0)
+        ctk.CTkSlider(
+            parent, from_=-12, to=12,
+            variable=self._vc_pitch_var,
+            command=self._on_vc_pitch_change,
+            progress_color="#6366f1", button_color="#a5b4fc",
+            button_hover_color="#818cf8",
+        ).pack(fill="x", padx=12, pady=(2, 4))
 
-        self._vc_gain_var = tk.DoubleVar(value=1.0)
-        gain_scale = ttk.Scale(
-            parent, from_=0.0, to=2.0, variable=self._vc_gain_var,
-            orient=tk.HORIZONTAL, command=self._on_vc_gain_change,
+        # --- gain slider ---------------------------------------------- #
+        gain_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        gain_frame.pack(fill="x", padx=12, pady=(6, 0))
+
+        ctk.CTkLabel(gain_frame, text="Gain", font=LABEL_FONT).pack(side="left")
+        self._vc_gain_label = ctk.CTkLabel(
+            gain_frame, text="1.0", font=BODY_FONT, text_color="#93c5fd",
         )
-        gain_scale.pack(fill=tk.X, padx=10)
+        self._vc_gain_label.pack(side="right")
 
-        # --- Setup hint ---
+        self._vc_gain_var = ctk.DoubleVar(value=1.0)
+        ctk.CTkSlider(
+            parent, from_=0.0, to=2.0,
+            variable=self._vc_gain_var,
+            command=self._on_vc_gain_change,
+            progress_color="#6366f1", button_color="#a5b4fc",
+            button_hover_color="#818cf8",
+        ).pack(fill="x", padx=12, pady=(2, 4))
+
+        # --- setup hint ----------------------------------------------- #
         hint = (
             "Setup:  Install VB-CABLE  (https://vb-audio.com/Cable/)\n"
             "1. Select your real mic as Input above\n"
             "2. Select CABLE Input as Output above\n"
             "3. In your game, set microphone to CABLE Output"
         )
-        ttk.Label(parent, text=hint, font=("Arial", 9), foreground="gray").pack(
-            anchor=tk.W, padx=10, pady=(16, 4)
-        )
+        ctk.CTkLabel(
+            parent, text=hint, font=HINT_FONT,
+            text_color="#6b7280", justify="left", anchor="w",
+        ).pack(fill="x", padx=12, pady=(16, 12))
 
         self._populate_vc_devices()
 
     def _populate_vc_devices(self):
-        """Fill input/output device dropdowns and select sensible defaults.
-
-        The output list only shows virtual-cable / non-speaker devices so
-        audio never accidentally goes to the user's speakers.
-        """
         vc = self.app.voice_converter
         if not vc:
             return
@@ -501,8 +523,8 @@ class DebugUI:
             cable_outputs = outputs
         out_names = [f"[{i}] {n}" for i, n in cable_outputs]
 
-        self._vc_input_combo["values"] = in_names
-        self._vc_output_combo["values"] = out_names
+        self._vc_input_combo.configure(values=in_names)
+        self._vc_output_combo.configure(values=out_names)
 
         if vc.input_device is not None:
             for name in in_names:
@@ -526,7 +548,6 @@ class DebugUI:
                         break
 
     def _parse_device_index(self, combo_value):
-        """Extract device index from '[idx] name' combo string."""
         try:
             return int(combo_value.split("]")[0][1:])
         except (ValueError, IndexError):
@@ -537,24 +558,29 @@ class DebugUI:
         if not vc:
             return
         is_on = vc.toggle()
-        self._vc_status_label.config(text="ON" if is_on else "OFF")
-        self._vc_toggle_btn.config(
-            text="Stop Voice Changer" if is_on else "Start Voice Changer"
+        self._vc_status_label.configure(
+            text="ON" if is_on else "OFF",
+            text_color="#4ade80" if is_on else "#f87171",
+        )
+        self._vc_toggle_btn.configure(
+            text="Stop Voice Changer" if is_on else "Start Voice Changer",
+            fg_color="#dc2626" if is_on else "#16a34a",
+            hover_color="#b91c1c" if is_on else "#15803d",
         )
 
-    def _on_vc_input_change(self, event=None):
+    def _on_vc_input_change(self, selection=None):
         vc = self.app.voice_converter
         if not vc:
             return
-        idx = self._parse_device_index(self._vc_input_combo.get())
+        idx = self._parse_device_index(selection or self._vc_input_combo.get())
         if idx is not None:
             vc.set_devices(input_device=idx)
 
-    def _on_vc_output_change(self, event=None):
+    def _on_vc_output_change(self, selection=None):
         vc = self.app.voice_converter
         if not vc:
             return
-        idx = self._parse_device_index(self._vc_output_combo.get())
+        idx = self._parse_device_index(selection or self._vc_output_combo.get())
         if idx is not None:
             vc.set_devices(output_device=idx)
 
@@ -563,7 +589,7 @@ class DebugUI:
         if not vc:
             return
         semitones = round(self._vc_pitch_var.get())
-        self._vc_pitch_label.config(text=f"{semitones:+d}")
+        self._vc_pitch_label.configure(text=f"{semitones:+d}")
         vc.set_pitch(semitones)
 
     def _on_vc_gain_change(self, value=None):
@@ -571,197 +597,206 @@ class DebugUI:
         if not vc:
             return
         gain = round(self._vc_gain_var.get(), 1)
-        self._vc_gain_label.config(text=f"{gain:.1f}")
+        self._vc_gain_label.configure(text=f"{gain:.1f}")
         vc.set_gain(gain)
 
-    # ---------------------------------------------------------------------- #
-    # Volume threshold                                                        #
-    # ---------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
+    # Volume threshold                                                    #
+    # ------------------------------------------------------------------ #
 
     def _on_vol_thresh_change(self, value=None):
-        val = self._vol_thresh_var.get()
-        val = round(val, 4)
-        self._vol_thresh_label.config(text=f"{val:.4f}")
+        val = round(self._vol_thresh_var.get(), 4)
+        self._vol_thresh_label.configure(text=f"{val:.4f}")
         self.app.config.volume_threshold = val
 
-    # ---------------------------------------------------------------------- #
-    # Filters tab                                                             #
-    # ---------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
+    # Filters tab                                                         #
+    # ------------------------------------------------------------------ #
 
-    def _build_filters_tab(self, parent: tk.Frame):
-        """Create the Filters tab content."""
-        # ---- header ----
-        header_frame = ttk.Frame(parent)
-        header_frame.pack(fill=tk.X, pady=(10, 2), padx=6)
-        ttk.Label(header_frame, text="Active Filters  (edit settings/filters.json to change)",
-                  font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Button(header_frame, text="Reload", width=8,
-                   command=self._reload_filters_tab).pack(side=tk.RIGHT)
+    def _build_filters_tab(self, parent):
+        header_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        header_frame.pack(fill="x", padx=12, pady=(12, 4))
 
-        # ---- filler words ----
-        ttk.Label(parent, text="Filler / Stopping Words  (stripped inline from output):",
-                  font=("Arial", 10)).pack(anchor=tk.W, padx=6, pady=(6, 2))
-        self._filler_text = scrolledtext.ScrolledText(parent, height=7, width=70, bg="#e8f4fd")
-        self._filler_text.pack(fill=tk.X, padx=6, pady=(0, 8))
-        self._filler_text.config(state="disabled")
+        ctk.CTkLabel(
+            header_frame,
+            text="Active Filters   (edit settings/filters.json to change)",
+            font=LABEL_FONT,
+        ).pack(side="left")
 
-        # ---- competitive words ----
-        ttk.Label(parent, text="Competitive Words / Phrases  (whole transcription suppressed):",
-                  font=("Arial", 10)).pack(anchor=tk.W, padx=6, pady=(2, 2))
-        self._competitive_text = scrolledtext.ScrolledText(parent, height=7, width=70, bg="#fde8e8")
-        self._competitive_text.pack(fill=tk.X, padx=6, pady=(0, 8))
-        self._competitive_text.config(state="disabled")
+        ctk.CTkButton(
+            header_frame, text="Reload", width=80, height=28,
+            command=self._reload_filters_tab,
+        ).pack(side="right")
+
+        ctk.CTkLabel(
+            parent,
+            text="Filler / Stopping Words   (stripped inline from output)",
+            font=BODY_FONT, anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 2))
+
+        self._filler_text = ctk.CTkTextbox(
+            parent, fg_color=PANEL_FILLER,
+            font=MONO_FONT, wrap="word", corner_radius=10,
+        )
+        self._filler_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._filler_text.configure(state="disabled")
 
         self._populate_filters_tab()
 
     def _populate_filters_tab(self):
-        """Fill in current filler/competitive word lists from the app config."""
         config = self.app.config
 
-        # Filler words
         filler = sorted(getattr(config, "filler_words", set()))
         filler_text = "  •  ".join(filler) if filler else "(none loaded)"
-        self._filler_text.config(state="normal")
-        self._filler_text.delete(1.0, tk.END)
-        self._filler_text.insert(tk.END, filler_text)
-        self._filler_text.config(state="disabled")
-
-        # Competitive words
-        competitive = getattr(config, "competitive_words", [])
-        comp_text = "  •  ".join(competitive) if competitive else "(none loaded)"
-        self._competitive_text.config(state="normal")
-        self._competitive_text.delete(1.0, tk.END)
-        self._competitive_text.insert(tk.END, comp_text)
-        self._competitive_text.config(state="disabled")
+        self._filler_text.configure(state="normal")
+        self._filler_text.delete("1.0", "end")
+        self._filler_text.insert("end", filler_text)
+        self._filler_text.configure(state="disabled")
 
     def _reload_filters_tab(self):
-        """Reload filters.json and refresh the tab display."""
         try:
-            from settings.config import _load_filters, _build_filler_strip_pattern, _build_competitive_pattern
+            from settings.config import (
+                _load_filters,
+                _build_filler_strip_pattern,
+            )
+
             filters = _load_filters()
             raw_filler = filters["filler_words"]
-            raw_competitive = filters["competitive_words"]
 
             self.app.config.filler_words = {w.lower().strip() for w in raw_filler}
             self.app.config._filler_strip_pattern = _build_filler_strip_pattern(raw_filler)
-            self.app.config.competitive_words = raw_competitive
-            self.app.config._competitive_pattern = _build_competitive_pattern(raw_competitive)
 
             self._populate_filters_tab()
             print("[Debug UI] Filters reloaded from filters.json")
         except Exception as exc:
             print(f"[Debug UI] Error reloading filters: {exc}")
 
+    # ------------------------------------------------------------------ #
+    # Settings tab                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_settings_tab(self, parent):
+        settings_header = ctk.CTkFrame(parent, fg_color="transparent")
+        settings_header.pack(fill="x", padx=12, pady=(12, 6))
+
+        ctk.CTkLabel(
+            settings_header, text="Current Configuration",
+            font=HEADING_FONT,
+        ).pack(side="left")
+
+        self.edit_button = ctk.CTkButton(
+            settings_header, text="Edit", width=84,
+            command=self.toggle_settings_edit_mode,
+        )
+        self.edit_button.pack(side="right")
+
+        self.settings_text = ctk.CTkTextbox(
+            parent, fg_color=PANEL_SETTINGS,
+            font=MONO_FONT, wrap="word", corner_radius=10,
+        )
+        self.settings_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.settings_text.configure(state="disabled")
+        self.settings_edit_mode = False
+
     def toggle_settings_edit_mode(self):
-        """Toggle between edit and read-only mode for settings"""
         if not self.settings_text:
             return
-            
+
         self.settings_edit_mode = not self.settings_edit_mode
-        
+
         if self.settings_edit_mode:
-            self.settings_text.config(state='normal', bg='#fff3cd')  # Yellow tint for edit mode
-            self.edit_button.config(text="Done")
+            self.settings_text.configure(state="normal", fg_color=PANEL_SETTINGS_EDIT)
+            self.edit_button.configure(text="Done", fg_color="#16a34a", hover_color="#15803d")
         else:
-            self.settings_text.config(state='disabled', bg='#f8f9fa')
-            self.edit_button.config(text="Edit")
+            self.settings_text.configure(state="disabled", fg_color=PANEL_SETTINGS)
+            self.edit_button.configure(text="Edit", fg_color=None, hover_color=None)
+
+    # ------------------------------------------------------------------ #
+    # Live updates                                                        #
+    # ------------------------------------------------------------------ #
 
     def update_debug_info(self):
-        """Update the debug information display"""
         if not (self.debug_window and self.debug_window.winfo_exists()):
             return
-            
+
         try:
-            # Refresh microphone list in case devices were added/removed
             self.refresh_microphone_list()
-            # Update microphone info
             mic_info = self.get_microphone_info()
-            
-            # Current microphone (temporarily enable to update content)
-            self.mic_info_text.config(state='normal')
-            self.mic_info_text.delete(1.0, tk.END)
+
+            self.mic_info_text.configure(state="normal")
+            self.mic_info_text.delete("1.0", "end")
             is_recording = self.app.recording_event.is_set()
             device_status = "Active Recording Device" if is_recording else "Default Device (Ready)"
-            current_info = f"""Status: {device_status}
-Device: {mic_info['current_device']['name'] if mic_info['current_device'] else 'None'}
-Index: {mic_info['current_device']['index'] if mic_info['current_device'] else 'None'}
-Sample Rate: {mic_info['sample_rate']} Hz
-Energy Threshold: {mic_info['energy_threshold']}
-Dynamic Energy: {mic_info['dynamic_energy_threshold']}
-Recording Status: {'Active' if is_recording else 'Inactive'}
-"""
-            self.mic_info_text.insert(tk.END, current_info)
-            self.mic_info_text.config(state='disabled')  # Re-disable after update
-            
-            # Settings info (only update if not in edit mode)
+            current_info = (
+                f"Status              {device_status}\n"
+                f"Device              {mic_info['current_device']['name'] if mic_info['current_device'] else 'None'}\n"
+                f"Index               {mic_info['current_device']['index'] if mic_info['current_device'] else 'None'}\n"
+                f"Sample Rate         {mic_info['sample_rate']} Hz\n"
+                f"Energy Threshold    {mic_info['energy_threshold']}\n"
+                f"Dynamic Energy      {mic_info['dynamic_energy_threshold']}\n"
+                f"Recording Status    {'Active' if is_recording else 'Inactive'}\n"
+            )
+            self.mic_info_text.insert("end", current_info)
+            self.mic_info_text.configure(state="disabled")
+
             if not self.settings_edit_mode:
-                self.settings_text.config(state='normal')
-                self.settings_text.delete(1.0, tk.END)
-                settings_info = f"""Model: {self.app.config.model}
-Non-English: {self.app.config.non_english}
-Energy Threshold: {self.app.config.energy_threshold}
-Record Timeout: {self.app.config.record_timeout}s
-Phrase Timeout: {self.app.config.phrase_timeout}s
-Volume Threshold: {self.app.config.volume_threshold}
-No Speech Threshold: {self.app.config.no_speech_threshold}
-Trailing Silence: {self.app.config.trailing_silence}s
-Threshold Adjustment: {self.app.config.threshold_adjustment}
-Inactivity Timeout: {self.app.config.inactivity_timeout}s
-Device: {self.app.device}
-CUDA Available: {torch.cuda.is_available()}
-"""
-                self.settings_text.insert(tk.END, settings_info)
-                self.settings_text.config(state='disabled')  # Re-disable after update
-            
+                self.settings_text.configure(state="normal")
+                self.settings_text.delete("1.0", "end")
+                settings_info = (
+                    f"Model                  {self.app.config.model}\n"
+                    f"Non-English            {self.app.config.non_english}\n"
+                    f"Energy Threshold       {self.app.config.energy_threshold}\n"
+                    f"Record Timeout         {self.app.config.record_timeout}s\n"
+                    f"Phrase Timeout         {self.app.config.phrase_timeout}s\n"
+                    f"Volume Threshold       {self.app.config.volume_threshold}\n"
+                    f"No Speech Threshold    {self.app.config.no_speech_threshold}\n"
+                    f"Trailing Silence       {self.app.config.trailing_silence}s\n"
+                    f"Threshold Adjustment   {self.app.config.threshold_adjustment}\n"
+                    f"Inactivity Timeout     {self.app.config.inactivity_timeout}s\n"
+                    f"Device                 {self.app.device}\n"
+                    f"CUDA Available         {torch.cuda.is_available()}\n"
+                )
+                self.settings_text.insert("end", settings_info)
+                self.settings_text.configure(state="disabled")
+
         except Exception as e:
             print(f"Error updating debug info: {e}")
 
     def save_debug_settings(self):
-        """Save current settings to the settings directory"""
         try:
-            # Save configuration using the config's save method
             success = self.app.config.save_to_file()
-            
+
             if success:
-                # Also save microphone info
                 mic_info = self.get_microphone_info()
                 settings_dir = "./settings"
                 mic_file = os.path.join(settings_dir, "microphone_info.json")
                 with open(mic_file, 'w') as f:
                     json.dump(mic_info, f, indent=2)
-                
-                # Show success message in debug window
-                if hasattr(self, 'settings_text') and self.settings_text:
-                    was_disabled = str(self.settings_text.cget('state')) == 'disabled'
-                    if was_disabled:
-                        self.settings_text.config(state='normal')
-                    self.settings_text.insert(tk.END, f"\n\n✓ Settings saved to ./settings at {datetime.now().strftime('%H:%M:%S')}")
-                    if was_disabled:
-                        self.settings_text.config(state='disabled')
+
+                self._append_settings_note(
+                    f"\n\n[OK]  Settings saved to ./settings at {datetime.now().strftime('%H:%M:%S')}"
+                )
             else:
-                if hasattr(self, 'settings_text') and self.settings_text:
-                    was_disabled = str(self.settings_text.cget('state')) == 'disabled'
-                    if was_disabled:
-                        self.settings_text.config(state='normal')
-                    self.settings_text.insert(tk.END, f"\n\n✗ Error saving settings")
-                    if was_disabled:
-                        self.settings_text.config(state='disabled')
-                
+                self._append_settings_note("\n\n[ERR]  Error saving settings")
+
         except Exception as e:
             print(f"Error saving settings: {e}")
-            if hasattr(self, 'settings_text') and self.settings_text:
-                was_disabled = str(self.settings_text.cget('state')) == 'disabled'
-                if was_disabled:
-                    self.settings_text.config(state='normal')
-                self.settings_text.insert(tk.END, f"\n\n✗ Error saving settings: {e}")
-                if was_disabled:
-                    self.settings_text.config(state='disabled')
+            self._append_settings_note(f"\n\n[ERR]  Error saving settings: {e}")
+
+    def _append_settings_note(self, note: str):
+        if not (hasattr(self, 'settings_text') and self.settings_text):
+            return
+        was_disabled = str(self.settings_text.cget('state')) == 'disabled'
+        if was_disabled:
+            self.settings_text.configure(state='normal')
+        self.settings_text.insert("end", note)
+        if was_disabled:
+            self.settings_text.configure(state='disabled')
 
     def cleanup(self):
-        """Clean up debug UI resources"""
         if self.debug_window:
             try:
                 self.debug_window.destroy()
-            except:
+            except Exception:
                 pass
             self.debug_window = None

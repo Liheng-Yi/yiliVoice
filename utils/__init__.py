@@ -6,7 +6,6 @@ from .audio_utils import (
     is_duplicate_or_partial,
     collapse_repeated_phrases,
     strip_filler_words,
-    contains_competitive_word,
 )
 from .voice_converter import VoiceConverter, SOUNDDEVICE_AVAILABLE
 
@@ -17,7 +16,6 @@ __all__ = [
     'is_duplicate_or_partial',
     'collapse_repeated_phrases',
     'strip_filler_words',
-    'contains_competitive_word',
     'VoiceConverter',
     'SOUNDDEVICE_AVAILABLE',
 ]

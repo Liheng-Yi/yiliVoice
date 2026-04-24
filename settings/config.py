@@ -37,28 +37,8 @@ _DEFAULT_FILLER_WORDS = [
     "anyway",
 ]
 
-_DEFAULT_COMPETITIVE_WORDS = [
-    "chatgpt", "chat gpt",
-    "openai", "open ai",
-    "gpt-4", "gpt4", "gpt 4",
-    "gpt-3", "gpt3", "gpt 3",
-    "google bard", "bard",
-    "gemini",
-    "copilot", "github copilot",
-    "microsoft copilot",
-    "claude", "anthropic",
-    "llama", "meta ai",
-    "mistral",
-    "perplexity",
-    "jasper",
-    "midjourney",
-    "stable diffusion",
-    "dall-e", "dalle",
-]
-
-
 def _load_filters(settings_dir: str = "./settings") -> dict:
-    """Load filler_words and competitive_words from filters.json.
+    """Load filler_words from filters.json.
 
     Falls back to the built-in defaults if the file is missing or malformed.
     """
@@ -67,18 +47,13 @@ def _load_filters(settings_dir: str = "./settings") -> dict:
         with open(filters_file, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         filler = data.get("filler_words", _DEFAULT_FILLER_WORDS)
-        competitive = data.get("competitive_words", _DEFAULT_COMPETITIVE_WORDS)
-        print(f"Filters loaded from {filters_file} "
-              f"({len(filler)} filler, {len(competitive)} competitive)")
-        return {"filler_words": filler, "competitive_words": competitive}
+        print(f"Filters loaded from {filters_file} ({len(filler)} filler)")
+        return {"filler_words": filler}
     except FileNotFoundError:
         print(f"filters.json not found at {filters_file}; using built-in defaults.")
     except Exception as exc:
         print(f"Error loading filters.json: {exc}; using built-in defaults.")
-    return {
-        "filler_words": _DEFAULT_FILLER_WORDS,
-        "competitive_words": _DEFAULT_COMPETITIVE_WORDS,
-    }
+    return {"filler_words": _DEFAULT_FILLER_WORDS}
 
 
 class VoiceConfig:
@@ -112,13 +87,6 @@ class VoiceConfig:
         # Regex pattern: match the filler word/phrase surrounded by word
         # boundaries (or string edges) so that "um" doesn't strip "umbrella".
         self._filler_strip_pattern: re.Pattern = _build_filler_strip_pattern(raw_filler)
-
-        # -- Competitive words / phrases ------------------------------------
-        # A transcription is *dropped entirely* when it contains a competitive
-        # term.  Stored as a compiled regex for efficient multi-pattern match.
-        raw_competitive: list = _filters["competitive_words"]
-        self.competitive_words: list[str] = raw_competitive
-        self._competitive_pattern: re.Pattern | None = _build_competitive_pattern(raw_competitive)
 
         # ------------------------------------------------------------------ #
         # Legacy hard-coded filter list (whole-transcript suppression)        #
@@ -208,15 +176,5 @@ def _build_filler_strip_pattern(filler_words: list) -> re.Pattern:
     escaped = [re.escape(w) for w in sorted_words]
     # \\b works for single-word fillers; for multi-word phrases we wrap with
     # (?<!\w) / (?!\w) look-arounds which work across the whole phrase.
-    pattern = r'(?<![a-z0-9])(?:' + '|'.join(escaped) + r')(?![a-z0-9])'
-    return re.compile(pattern, re.IGNORECASE)
-
-
-def _build_competitive_pattern(competitive_words: list) -> re.Pattern | None:
-    """Build a regex that detects any competitive brand/product name."""
-    if not competitive_words:
-        return None
-    sorted_words = sorted(competitive_words, key=len, reverse=True)
-    escaped = [re.escape(w) for w in sorted_words]
     pattern = r'(?<![a-z0-9])(?:' + '|'.join(escaped) + r')(?![a-z0-9])'
     return re.compile(pattern, re.IGNORECASE)

@@ -9,6 +9,7 @@ Public API (kept backwards compatible):
 """
 
 import math
+import math
 import tkinter as tk
 
 import customtkinter as ctk

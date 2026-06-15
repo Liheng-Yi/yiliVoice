@@ -689,6 +689,8 @@ class DebugUI:
             command=self.toggle_settings_edit_mode,
         )
         self.edit_button.pack(side="right")
+        self._edit_button_default_fg = self.edit_button.cget("fg_color")
+        self._edit_button_default_hover = self.edit_button.cget("hover_color")
 
         self.settings_text = ctk.CTkTextbox(
             parent, fg_color=PANEL_SETTINGS,
@@ -709,7 +711,11 @@ class DebugUI:
             self.edit_button.configure(text="Done", fg_color="#16a34a", hover_color="#15803d")
         else:
             self.settings_text.configure(state="disabled", fg_color=PANEL_SETTINGS)
-            self.edit_button.configure(text="Edit", fg_color=None, hover_color=None)
+            self.edit_button.configure(
+                text="Edit",
+                fg_color=self._edit_button_default_fg,
+                hover_color=self._edit_button_default_hover,
+            )
 
     # ------------------------------------------------------------------ #
     # Live updates                                                        #

@@ -159,6 +159,24 @@ def _make_key_predicate(key_name: str):
     return lambda k: getattr(k, "char", None) == key_name
 
 
+def _single_special_key(binding):
+    """If *binding* is a single special key like ``<page_down>``, return the
+    pynput ``Key`` it maps to; otherwise None.
+
+    GlobalHotKeys is unreliable for a bare special key: ``HotKey.parse`` turns
+    ``<page_down>`` into a vk ``KeyCode`` while the listener reports the
+    ``Key.page_down`` enum, so they never match and the hotkey never fires. We
+    route these through a direct press listener instead.
+    """
+    import re
+    from pynput import keyboard
+
+    m = re.fullmatch(r"\s*<([a-z_0-9]+)>\s*", binding or "")
+    if not m:
+        return None
+    return getattr(keyboard.Key, m.group(1), None)
+
+
 class HotkeyManager:
     """Base class: callback registry + debounce.  Subclasses do the binding."""
 
@@ -248,6 +266,7 @@ class PynputHotkeys(HotkeyManager):
         prewarm_macos_key_layout()
 
         combo_map = {}
+        single_map = {}    # pynput Key -> action (bare special keys)
         double_specs = []  # (action, key_name)
         for action in self._callbacks:
             binding = self.bindings.get(action)
@@ -255,10 +274,14 @@ class PynputHotkeys(HotkeyManager):
                 continue
             if binding.startswith("double:"):
                 double_specs.append((action, binding.split(":", 1)[1].strip().lower()))
+                continue
+            special = _single_special_key(binding)
+            if special is not None:
+                single_map[special] = action
             else:
                 combo_map[binding] = (lambda a=action: self._fire(a))
 
-        if not combo_map and not double_specs:
+        if not combo_map and not single_map and not double_specs:
             print("[Hotkeys] No hotkeys registered.")
             return
 
@@ -270,11 +293,22 @@ class PynputHotkeys(HotkeyManager):
             gl.start()
             self._listeners.append(gl)
 
+        if single_map:
+            # pynput calls on_press as (key, injected); accept the extra arg.
+            def on_single(key, *args):
+                action = single_map.get(key)
+                if action is not None:
+                    self._fire(action)
+            lis = keyboard.Listener(on_press=on_single)
+            lis.daemon = True
+            lis.start()
+            self._listeners.append(lis)
+
         for action, key_name in double_specs:
             predicate = _make_key_predicate(key_name)
             tracker = _DoubleTapTracker(self.double_tap_window)
 
-            def on_press(key, action=action, predicate=predicate, tracker=tracker):
+            def on_press(key, *args, action=action, predicate=predicate, tracker=tracker):
                 try:
                     if predicate(key) and tracker.feed(time.monotonic()):
                         self._fire(action)
@@ -291,7 +325,7 @@ class PynputHotkeys(HotkeyManager):
         # events aren't reaching us (a permission problem); if they appear but
         # the combo never fires, it's a key-matching problem.
         if os.environ.get("YILIVOICE_DEBUG_KEYS"):
-            def _debug_press(key):
+            def _debug_press(key, *args):
                 try:
                     print(f"[Hotkeys][debug] key down: {key!r}")
                 except Exception:
@@ -305,7 +339,8 @@ class PynputHotkeys(HotkeyManager):
         self._started = True
         print(
             f"[Hotkeys] pynput listening "
-            f"(combos={len(combo_map)}, double-tap={len(double_specs)}, no sudo needed)."
+            f"(combos={len(combo_map)}, single-key={len(single_map)}, "
+            f"double-tap={len(double_specs)}, no sudo needed)."
         )
 
     def stop(self) -> None:

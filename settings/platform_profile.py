@@ -171,12 +171,12 @@ _OS_TABLE = {
     OS_MACOS: {
         "hotkey_backend": "pynput",
         "hotkeys": {
-            "toggle_recording": "<page_down>",
+            "toggle_recording": "<cmd_r>",
             "toggle_voice_changer": "<ctrl>+<alt>+9",
             "toggle_vc_routing": "<ctrl>+<alt>+0",
         },
         "hotkey_labels": {
-            "toggle_recording": "Page Down",
+            "toggle_recording": "Right ⌘ (Command)",
             "toggle_voice_changer": "Ctrl+Option+9",
             "toggle_vc_routing": "Ctrl+Option+0",
         },

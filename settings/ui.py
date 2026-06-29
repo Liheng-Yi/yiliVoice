@@ -1,20 +1,23 @@
-"""Main status + log window, built on PySide6 (Qt).
+"""Minimal floating status dot, built on PySide6 (Qt).
 
-Qt renders reliably on macOS — unlike Apple's deprecated system Tcl/Tk 8.5,
-which left plain ``tk`` widgets unpainted (only native buttons showed). This
-module replaces the old Tk/customtkinter UI.
+The whole status UI is a single coloured dot that floats on top of other
+windows (like the old Windows indicator). Its colour reflects the app state:
+
+    loading   amber      ready   violet
+    recording green      idle    red
+
+Interactions:
+    * left-click  → open the Settings window (debug_callback)
+    * drag        → move the dot
+    * right-click → menu (Settings / Quit)
 
 Public API (kept compatible with the app):
     create_overlay_window(debug_callback=None, hotkey_label="…", on_close=None)
         -> (qt_app, window, window)
-    update_indicator(qt_app, window, state)   # state: ready/recording/idle/loading
-
-``window`` is returned twice so the app's historical ``(canvas, indicator)``
-pair both point at the same :class:`StatusWindow`.
+    update_indicator(qt_app, window, state)   # ready/recording/idle/loading
 """
 
 import sys
-import queue as _queue
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -33,7 +36,7 @@ STATE_INFO = {
     "idle":      ("#f87171", "Idle (auto-paused)"),
 }
 
-# Application-wide dark stylesheet (shared by the status + settings windows).
+# Application-wide dark stylesheet (used by the Settings window + menus).
 APP_QSS = f"""
 QWidget {{
     background-color: {BG};
@@ -68,6 +71,8 @@ QComboBox QAbstractItemView {{
     selection-background-color: #4f46e5;
     border: 1px solid #374151;
 }}
+QMenu {{ background-color: #151923; border: 1px solid #374151; }}
+QMenu::item:selected {{ background-color: #4f46e5; }}
 QTabWidget::pane {{ border: 1px solid #1f2937; border-radius: 8px; }}
 QTabBar::tab {{
     background: #1f2937;
@@ -91,97 +96,31 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 """
 
 
-class _LogTee:
-    """Write-through stdout/stderr wrapper that also feeds a queue."""
-
-    def __init__(self, original, q):
-        self._orig = original
-        self._q = q
-
-    def write(self, s):
-        if self._orig:
-            try:
-                self._orig.write(s)
-            except Exception:
-                pass
-        try:
-            self._q.put(s)
-        except Exception:
-            pass
-
-    def flush(self):
-        if self._orig:
-            try:
-                self._orig.flush()
-            except Exception:
-                pass
-
-    def isatty(self):
-        return False
-
-
 class StatusWindow(QtWidgets.QWidget):
-    """Status header (coloured dot + text) + a live, scrolling log."""
+    """A single always-on-top, draggable status dot."""
+
+    SIZE = 30  # window is SIZE×SIZE; the dot is inset a few px
 
     def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None):
         super().__init__()
         self.hotkey_label = hotkey_label
+        self._debug_callback = debug_callback
         self._on_close = on_close
         self._tick_cb = None
         self.state = "loading"
 
+        self._drag_offset = None
+        self._press_pos = None
+        self._moved = False
+
         self.setWindowTitle("yiliVoice")
-        self.setMinimumSize(440, 320)
-        self.resize(600, 460)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-
-        # ---- header: coloured dot + status text ----------------------- #
-        header = QtWidgets.QHBoxLayout()
-        header.setSpacing(8)
-        self.dot = QtWidgets.QLabel("●")
-        self.status_label = QtWidgets.QLabel("Loading model…")
-        header.addWidget(self.dot)
-        header.addWidget(self.status_label)
-        header.addStretch(1)
-        layout.addLayout(header)
-
-        # ---- hotkey hint ---------------------------------------------- #
-        self.hint = QtWidgets.QLabel(
-            f"Press {hotkey_label} to start / stop recording."
+        self.setWindowFlags(
+            QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
         )
-        self.hint.setStyleSheet(f"color: {MUTED};")
-        layout.addWidget(self.hint)
-
-        # ---- buttons -------------------------------------------------- #
-        btns = QtWidgets.QHBoxLayout()
-        if debug_callback:
-            settings_btn = QtWidgets.QPushButton("Settings")
-            settings_btn.clicked.connect(lambda: debug_callback())
-            btns.addWidget(settings_btn)
-        clear_btn = QtWidgets.QPushButton("Clear log")
-        clear_btn.clicked.connect(self.clear_log)
-        btns.addWidget(clear_btn)
-        btns.addStretch(1)
-        layout.addLayout(btns)
-
-        # ---- log ------------------------------------------------------ #
-        log_caption = QtWidgets.QLabel("Log")
-        log_caption.setStyleSheet(f"color: {MUTED}; font-weight: 600;")
-        layout.addWidget(log_caption)
-
-        self.log = QtWidgets.QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(2000)  # cap memory; drop oldest lines
-        mono = QtGui.QFont("Menlo")
-        mono.setStyleHint(QtGui.QFont.Monospace)
-        mono.setPointSize(11)
-        self.log.setFont(mono)
-        layout.addWidget(self.log, 1)
-
-        self._apply_state_styles()
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background: transparent;")  # override app QSS bg
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self._refresh_tooltip()
 
     # -- public API used by the app ------------------------------------- #
 
@@ -193,44 +132,88 @@ class StatusWindow(QtWidgets.QWidget):
         if state not in STATE_INFO:
             return
         self.state = state
-        self._apply_state_styles()
-
-    def _apply_state_styles(self) -> None:
-        color, text = STATE_INFO[self.state]
-        if self.state in ("ready", "idle"):
-            text = f"{text} — press {self.hotkey_label}"
-        self.dot.setStyleSheet(f"color: {color}; font-size: 20px;")
-        text_color = FG if self.state == "loading" else color
-        self.status_label.setStyleSheet(
-            f"color: {text_color}; font-size: 15px; font-weight: 700;"
-        )
-        self.status_label.setText(text)
+        self._refresh_tooltip()
+        self.update()  # trigger repaint
 
     def append_log(self, s: str) -> None:
-        """Append text to the log. Must be called on the GUI thread."""
-        if not s:
-            return
-        bar = self.log.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 4
-        self.log.moveCursor(QtGui.QTextCursor.End)
-        self.log.insertPlainText(s)
-        if at_bottom:
-            self.log.moveCursor(QtGui.QTextCursor.End)
-            self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+        """No on-screen log in dot mode — output goes to the terminal."""
+        return
 
-    def clear_log(self) -> None:
-        self.log.clear()
+    def _refresh_tooltip(self):
+        _, text = STATE_INFO[self.state]
+        if self.state in ("ready", "idle"):
+            text = f"{text} — {self.hotkey_label}"
+        self.setToolTip(
+            f"yiliVoice — {text}\nclick: settings   ·   right-click: menu"
+        )
+
+    # -- painting ------------------------------------------------------- #
+
+    def paintEvent(self, event):
+        color = QtGui.QColor(STATE_INFO[self.state][0])
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        d = self.SIZE
+        p.setPen(QtCore.Qt.NoPen)
+        # subtle dark halo so the dot stays visible on any background
+        p.setBrush(QtGui.QColor(0, 0, 0, 90))
+        p.drawEllipse(2, 2, d - 4, d - 4)
+        # coloured status dot
+        m = 5
+        p.setBrush(color)
+        p.drawEllipse(m, m, d - 2 * m, d - 2 * m)
+        p.end()
+
+    # -- mouse: click → settings, drag → move, right-click → menu ------- #
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton:
+            self._press_pos = e.globalPosition().toPoint()
+            self._drag_offset = self._press_pos - self.frameGeometry().topLeft()
+            self._moved = False
+            e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._drag_offset is not None and (e.buttons() & QtCore.Qt.LeftButton):
+            gp = e.globalPosition().toPoint()
+            if (gp - self._press_pos).manhattanLength() > 4:
+                self._moved = True
+            self.move(gp - self._drag_offset)
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton:
+            was_click = not self._moved
+            self._drag_offset = None
+            self._press_pos = None
+            self._moved = False
+            if was_click and self._debug_callback:
+                self._debug_callback()
+            e.accept()
+
+    def contextMenuEvent(self, e):
+        menu = QtWidgets.QMenu(self)
+        act_settings = menu.addAction("Settings")
+        menu.addSeparator()
+        act_quit = menu.addAction("Quit yiliVoice")
+        chosen = menu.exec(e.globalPos())
+        if chosen == act_settings and self._debug_callback:
+            self._debug_callback()
+        elif chosen == act_quit:
+            self._quit()
 
     # -- lifecycle ------------------------------------------------------ #
 
-    def closeEvent(self, event):
-        """Window close asks the app to shut down, then quits the Qt loop."""
+    def _quit(self):
         if self._on_close:
             try:
                 self._on_close()
             except Exception:
                 pass
         QtWidgets.QApplication.quit()
+
+    def closeEvent(self, event):
+        self._quit()
         event.accept()
 
 
@@ -240,11 +223,14 @@ def _ensure_app() -> QtWidgets.QApplication:
         app = QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName("yiliVoice")
     app.setStyleSheet(APP_QSS)
+    # The dot is a frameless overlay; closing the Settings window must NOT quit
+    # the app. We quit explicitly (dot right-click → Quit, or Ctrl+C).
+    app.setQuitOnLastWindowClosed(False)
     return app
 
 
 def create_overlay_window(debug_callback=None, hotkey_label="the hotkey", on_close=None):
-    """Create the QApplication (if needed) and the main status/log window.
+    """Create the QApplication (if needed) and the floating status dot.
 
     Returns ``(qt_app, window, window)``.
     """
@@ -255,32 +241,17 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey", on_clo
         debug_callback=debug_callback,
         on_close=on_close,
     )
-    window.move(20, 40)  # top-left, clear of the menu bar
+    window.move(40, 60)  # near the top-left; drag to taste
     window.show()
     window.raise_()
-    window.activateWindow()
 
-    # Mirror stdout/stderr into the on-screen log (keeps the terminal too).
-    log_q = _queue.Queue()
-    tee_out = _LogTee(sys.__stdout__, log_q)
-    tee_err = _LogTee(sys.__stderr__, log_q)
-    sys.stdout = tee_out
-    sys.stderr = tee_err
-
-    # A single GUI-thread timer drains the log queue and runs the app's
-    # per-tick work (indicator updates, deferred hotkey start). Keeping a
-    # short interval also lets Python service Ctrl+C while Qt's loop runs.
+    # A GUI-thread timer runs the app's per-tick work (indicator updates,
+    # deferred hotkey start) and keeps Python servicing Ctrl+C during exec().
     def _pump():
-        try:
-            while True:
-                window.append_log(log_q.get_nowait())
-        except _queue.Empty:
-            pass
         if window._tick_cb is not None:
             try:
                 window._tick_cb()
             except Exception as exc:
-                # Never let a tick error kill the timer.
                 sys.__stderr__.write(f"UI tick error: {exc}\n")
 
     timer = QtCore.QTimer(window)
@@ -289,15 +260,10 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey", on_clo
     window._pump_timer = timer
 
     def teardown():
-        """Stop the pump and restore stdio. Idempotent."""
         try:
             timer.stop()
         except Exception:
             pass
-        if sys.stdout is tee_out:
-            sys.stdout = sys.__stdout__
-        if sys.stderr is tee_err:
-            sys.stderr = sys.__stderr__
 
     window.teardown = teardown
 
@@ -305,9 +271,6 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey", on_clo
 
 
 def update_indicator(qt_app, window, state):
-    """Update the status window to a named state (ready/recording/idle/loading).
-
-    Safe to call from the GUI-thread tick (which is how the app drives it).
-    """
+    """Update the dot to a named state (ready/recording/idle/loading)."""
     if hasattr(window, "set_state"):
         window.set_state(state)

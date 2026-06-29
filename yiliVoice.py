@@ -1,32 +1,41 @@
 import argparse
+import os
+import signal
 import numpy as np
 import speech_recognition as sr
-from faster_whisper import WhisperModel
-import torch
 import pyautogui
-import keyboard
 import threading
 import time
-import tkinter as tk
 from collections import deque
 
 from datetime import datetime, timedelta, timezone
 from queue import Queue, Empty, Full
-from time import sleep
-from sys import platform
 
 
 # Import our modular components
 from settings import (
     VoiceConfig, DebugUI,
-    create_overlay_window, update_indicator
+    create_overlay_window, update_indicator,
 )
 from utils import (
     AudioBuffer, clean_sentence, normalize_filter_text,
     is_duplicate_or_partial, collapse_repeated_phrases,
     strip_filler_words,
     VoiceConverter, SOUNDDEVICE_AVAILABLE,
+    create_backend, create_hotkey_manager, play_cue,
 )
+
+
+def _force_quit(signum, frame):
+    """Hard-exit on Ctrl+C / SIGTERM.
+
+    The Tk event loop and the pynput listeners can swallow SIGINT on macOS,
+    so a normal KeyboardInterrupt may never reach us. Exiting immediately from
+    the signal handler guarantees Ctrl+C always quits; the OS reclaims the mic,
+    audio streams and event taps.
+    """
+    print("\nInterrupt received — exiting.", flush=True)
+    os._exit(0)
 
 
 
@@ -34,8 +43,11 @@ from utils import (
 class VoiceRecognitionApp:
     def __init__(self, config):
         self.config = config
-        self.audio_model = None
-        self.device = None
+        self.profile = config.profile
+        self.backend = None          # transcription backend (faster-whisper / mlx)
+        self.hotkeys = None          # global-hotkey manager
+        self.ready = False           # True once the model + audio are loaded
+        self.device = self.profile.accelerator_label
         self.recorder = None
         self.source = None
         self.background_listener = None
@@ -55,15 +67,15 @@ class VoiceRecognitionApp:
         # Timing
         self.phrase_time = datetime.now(timezone.utc)
         self.last_activity_time = datetime.now(timezone.utc)
-        self.last_shortkey_time = datetime.now(timezone.utc) - timedelta(seconds=1)  # Initialize to allow immediate first press
-        
-        # Voice converter (real-time pitch shift → virtual cable)
-        self.voice_converter = None
-        self.last_vc_toggle_time = datetime.now(timezone.utc) - timedelta(seconds=1)
-        self.last_vc_route_time = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-        
-        # UI
+        # Voice converter (real-time pitch shift → virtual cable).
+        # Hotkey debounce is handled centrally by the HotkeyManager.
+        self.voice_converter = None
+
+        # UI (Qt). ``root``/``canvas``/``indicator`` all alias the status
+        # window to stay compatible with the queue-driven update helpers.
+        self.qt_app = None
+        self.window = None
         self.root = None
         self.canvas = None
         self.indicator = None
@@ -79,27 +91,22 @@ class VoiceRecognitionApp:
             return
         
     def initialize_model(self):
-        """Initialize the Whisper model with progress indication"""
-        # Check if GPU is available
-        if torch.cuda.is_available():
-            self.device = "cuda"
-            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            self.device = "cpu"
-            print("CUDA not available, using CPU")
-        
-        print("Loading Faster Whisper model...")
-        # Use the model specified in config
-        model_name = f"{self.config.model}.en" if not self.config.non_english else self.config.model
-        
-        # Determine compute type based on device
-        if self.device == "cuda":
-            compute_type = "float16"
-        else:
-            compute_type = "int8"
-            
-        self.audio_model = WhisperModel(model_name, device=self.device, compute_type=compute_type)
-        print(f"Model loaded on {self.device}")
+        """Initialize the transcription backend for the active platform.
+
+        The backend is chosen automatically by the platform profile:
+        Apple-GPU MLX on Apple Silicon, NVIDIA CUDA on Windows/Linux with
+        a CUDA GPU, or CPU otherwise.
+        """
+        self.profile = self.config.profile
+        print(f"[Platform] {self.profile.summary()}")
+        self.device = self.profile.accelerator_label
+
+        self.backend = create_backend(
+            self.profile, self.config.model, self.config.non_english
+        )
+        print("Warming up model (first run may download weights)...")
+        self.backend.warm_up()
+        print(f"Model ready: {self.backend.model_ref}  [{self.backend.device_label}]")
     
     def initialize_audio(self):
         """Initialize audio recording components"""
@@ -116,15 +123,103 @@ class VoiceRecognitionApp:
             self.recorder.adjust_for_ambient_noise(temp_source)
         # temp_source is properly disposed of here
     
+    @staticmethod
+    def _resolve_input_device_index(requested):
+        """Return a usable input-device index (or None for the system default).
+
+        A stale/invalid index — e.g. a saved ``0`` that points at an output
+        device with no input channels — would make ``sr.Microphone`` fail to
+        open. speech_recognition *swallows* that failure (it leaves
+        ``source.stream = None`` and returns normally), so the background
+        listener later crashes with a cryptic ``NoneType`` error. We avoid that
+        by falling back to the default input device, then to the first device
+        that actually has input channels.
+        """
+        try:
+            import pyaudio
+        except Exception:
+            return requested
+        pa = pyaudio.PyAudio()
+        try:
+            count = pa.get_device_count()
+
+            def is_input(i):
+                try:
+                    return pa.get_device_info_by_index(i).get("maxInputChannels", 0) > 0
+                except Exception:
+                    return False
+
+            if requested is not None and 0 <= requested < count and is_input(requested):
+                return requested
+
+            try:
+                default_idx = pa.get_default_input_device_info().get("index")
+            except Exception:
+                default_idx = None
+            if default_idx is not None and is_input(default_idx):
+                print(f"Microphone index {requested} is not an input device; "
+                      f"falling back to default input [{default_idx}].")
+                return default_idx
+
+            for i in range(count):
+                if is_input(i):
+                    print(f"Microphone index {requested} unusable; using input [{i}].")
+                    return i
+
+            print("No input devices with capture channels were found.")
+            return None
+        finally:
+            pa.terminate()
+
+    @staticmethod
+    def _microphone_opens(device_index):
+        """Best-effort test that an input stream can actually be opened.
+
+        Returns ``(ok, error_message)``. Catches the real failure (bad device
+        or, on macOS, a missing Microphone permission) that SR would otherwise
+        hide."""
+        try:
+            import pyaudio
+        except Exception as exc:
+            return True, None  # can't test; let the normal path try
+        pa = pyaudio.PyAudio()
+        try:
+            kwargs = dict(format=pyaudio.paInt16, channels=1, rate=16000,
+                          input=True, frames_per_buffer=1024)
+            if device_index is not None:
+                kwargs["input_device_index"] = device_index
+            stream = pa.open(**kwargs)
+            stream.close()
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            pa.terminate()
+
     def create_fresh_microphone_source(self):
-        """Create a fresh microphone source to avoid context manager conflicts"""
-        device_index = self.config.selected_microphone_index
+        """Create a fresh, validated microphone source.
+
+        Resolves a usable input-device index and pre-flights the open so a bad
+        device or a missing macOS Microphone permission raises here (caught by
+        toggle_recording) instead of crashing the background listener thread.
+        """
+        device_index = self._resolve_input_device_index(self.config.selected_microphone_index)
+        # Remember the resolved choice so the UI + saved config reflect reality.
+        self.config.selected_microphone_index = device_index
+
+        ok, err = self._microphone_opens(device_index)
+        if not ok:
+            raise OSError(
+                f"could not open microphone (device {device_index}): {err}. "
+                "On macOS, grant Microphone access in "
+                "System Settings → Privacy & Security → Microphone."
+            )
+
         if device_index is not None:
-            print(f"Creating microphone with selected device index: {device_index}")
+            print(f"Creating microphone with device index: {device_index}")
             return sr.Microphone(device_index=device_index, sample_rate=16000)
-        else:
-            print("Creating microphone with system default device")
-            return sr.Microphone(sample_rate=16000)
+        print("Creating microphone with system default device")
+        return sr.Microphone(sample_rate=16000)
 
     def should_filter_transcription(self, text: str) -> bool:
         """Decide whether a transcription should be suppressed.
@@ -276,26 +371,22 @@ class VoiceRecognitionApp:
             if peak_amplitude < self.config.volume_threshold:
                 return ""
 
-            segments, info = self.audio_model.transcribe(
+            result = self.backend.transcribe(
                 audio_np,
-                language="en" if not self.config.non_english else None,
-                temperature=0.0,
-                beam_size=5,
+                non_english=self.config.non_english,
+                no_speech_threshold=self.config.no_speech_threshold,
                 compression_ratio_threshold=1.35 * self.config.threshold_adjustment,
-                condition_on_previous_text=False,
-                vad_filter=True, # Enable built-in VAD
-                vad_parameters=dict(min_silence_duration_ms=500)
             )
 
-            segments = list(segments)
-            if not segments:
+            if not result.text:
                 return ""
 
-            # Check no_speech_prob (using the first segment as proxy if needed, or rely on VAD)
-            if segments[0].no_speech_prob >= self.config.no_speech_threshold:
+            # Drop segments Whisper flags as likely non-speech (reduces the
+            # classic "thank you" hallucination on silence).
+            if result.no_speech_prob >= self.config.no_speech_threshold:
                 return ""
 
-            text = " ".join([s.text for s in segments]).strip()
+            text = result.text
             text = clean_sentence(text)
             text = collapse_repeated_phrases(text)
             # Strip inline filler/stopping words (e.g. "emmm", "uh", "you know")
@@ -348,15 +439,13 @@ class VoiceRecognitionApp:
             print("[VoiceConverter] Install with:  pip install sounddevice")
             return
 
-        cables = VoiceConverter.find_virtual_cables()
+        keywords = self.profile.virtual_cable_keywords
+        cables = VoiceConverter.find_virtual_cables(keywords)
         output_dev = cables[0][0] if cables else None
 
         if output_dev is None:
-            print(
-                "[VoiceConverter] No virtual audio cable detected.\n"
-                "  Install VB-CABLE (https://vb-audio.com/Cable/) then restart.\n"
-                "  In your game, set microphone to the virtual cable output."
-            )
+            print("[VoiceConverter] No virtual audio cable detected.")
+            print(self.profile.virtual_cable_setup)
 
         self.voice_converter = VoiceConverter(
             input_device=self.config.selected_microphone_index,
@@ -364,6 +453,7 @@ class VoiceRecognitionApp:
             pitch_semitones=7,
             sample_rate=48000,
             block_size=1024,
+            virtual_cable_keywords=keywords,
         )
 
     def toggle_voice_converter(self):
@@ -382,42 +472,71 @@ class VoiceRecognitionApp:
             return
         is_speaker = self.voice_converter.toggle_routing()
         
-    def keyboard_handler_thread(self):
+    def setup_hotkeys(self):
+        """Register global hotkeys via the platform-appropriate backend.
 
-        """Dedicated thread for handling keyboard input"""
-        while not self.shutdown_event.is_set():
-            try:
-                if keyboard.is_pressed('pause'):
-                    now = datetime.now(timezone.utc)
-                    time_since_last_press = (now - self.last_shortkey_time).total_seconds()
-                    
-                    if time_since_last_press >= 0.5:
-                        self.last_shortkey_time = now
-                        self.toggle_recording()
-                        time.sleep(0.2)
+        On Windows this uses the ``keyboard`` library; on macOS/Linux it
+        uses ``pynput`` (no sudo needed).  Bindings come from the platform
+        profile, so the key combos differ per OS.
+        """
+        self.hotkeys = create_hotkey_manager(self.profile)
+        self.hotkeys.set_activity_callback(self._on_hotkey_activity)
+        self.hotkeys.register('toggle_recording', self.toggle_recording)
+        self.hotkeys.register('toggle_voice_changer', self.toggle_voice_converter)
+        self.hotkeys.register('toggle_vc_routing', self.toggle_voice_converter_routing)
+        self.hotkeys.start()
+        self._check_hotkey_permissions()
 
-                if keyboard.is_pressed('ctrl+f9'):
-                    now = datetime.now(timezone.utc)
-                    if (now - self.last_vc_toggle_time).total_seconds() >= 0.5:
-                        self.last_vc_toggle_time = now
-                        self.toggle_voice_converter()
-                        time.sleep(0.2)
+    def _check_hotkey_permissions(self):
+        """On macOS, verify (and prompt for) the TWO permissions hotkeys need.
 
-                if keyboard.is_pressed('ctrl+f10'):
-                    now = datetime.now(timezone.utc)
-                    if (now - self.last_vc_route_time).total_seconds() >= 0.5:
-                        self.last_vc_route_time = now
-                        self.toggle_voice_converter_routing()
-                        time.sleep(0.2)
+        Input Monitoring lets the listener *receive* the hotkey; Accessibility
+        lets pyautogui *type* the transcribed text. They are independent — a
+        missing Input Monitoring grant makes the hotkey silently do nothing
+        even when Accessibility is on — so we check both.
+        """
+        if self.profile.detected_os != "macos":
+            return
+        try:
+            from utils.hotkeys import (
+                macos_accessibility_trusted,
+                macos_input_monitoring_trusted,
+            )
+            input_mon = macos_input_monitoring_trusted(prompt=True)
+            accessibility = macos_accessibility_trusted(prompt=True)
+        except Exception:
+            input_mon = accessibility = None
 
-                time.sleep(0.02)
+        if input_mon and accessibility:
+            print("[Permissions] Input Monitoring + Accessibility: granted.")
+            return
 
-            except Exception as e:
-                print(f"Keyboard handler error: {e}")
-    
+        def mark(state):
+            return "granted" if state else ("MISSING" if state is False else "unknown")
+
+        rec = self.profile.hotkey_labels.get('toggle_recording', 'the hotkey')
+        bar = "=" * 66
+        print("\n" + bar)
+        print("  ⚠  GLOBAL HOTKEYS NEED PERMISSION (macOS)")
+        print(f"     '{rec}' will do nothing until BOTH of these are enabled for")
+        print("     your terminal app in System Settings → Privacy & Security:")
+        print(f"        •  Input Monitoring   [{mark(input_mon)}]   ← receives the hotkey")
+        print(f"        •  Accessibility      [{mark(accessibility)}]   ← types the text out")
+        print("     Enable the missing one(s), then FULLY QUIT the terminal,")
+        print("     reopen it, and run again.")
+        print(bar + "\n")
+
+    def _on_hotkey_activity(self):
+        """Any hotkey press counts as activity (wakes the app from idle)."""
+        self.last_activity_time = datetime.now(timezone.utc)
+
     def toggle_recording(self):
         """Toggle recording state with proper resource management"""
         self.last_activity_time = datetime.now(timezone.utc)
+
+        if not self.ready:
+            print("Model still loading — please wait a moment…")
+            return
 
         if self.recording_event.is_set():
             # Stop recording
@@ -441,6 +560,7 @@ class VoiceRecognitionApp:
 
             print("Recording stopped...")
             self.update_indicator_safe(False)
+            play_cue("stop")
 
         else:
             # Start recording with a completely fresh microphone source
@@ -461,10 +581,12 @@ class VoiceRecognitionApp:
                 )
                 print("Recording started...")
                 self.update_indicator_safe(True)
+                play_cue("start")
             except Exception as e:
                 print(f"Error starting recording: {e}")
                 self.recording_event.clear()
                 self.source = None
+                self.update_indicator_safe(False)  # back to 'ready', not stuck
                 # Try to reinitialize audio if there's an issue
                 try:
                     print("Attempting to reinitialize audio...")
@@ -481,37 +603,36 @@ class VoiceRecognitionApp:
             if inactive_time > self.config.inactivity_timeout:
                 print("No activity for 10 minutes, entering idle mode...")
                 self.update_indicator_safe(False, idle=True)
-                
+
                 # Stop recording if active
                 if self.recording_event.is_set():
                     self.toggle_recording()
-                
-                # Optional: Unload model to save memory (uncomment if you want "rebooting" behavior)
-                # print("Unloading model to save memory...")
-                # self.audio_model = None
-                # if self.device == "cuda":
-                #     torch.cuda.empty_cache()
-                
-                # Wait for activity
-                while inactive_time > self.config.inactivity_timeout:
-                    if keyboard.is_pressed('pause'):
-                        self.last_activity_time = datetime.now(timezone.utc)
-                        
-                        # Optional: Reload model if it was unloaded (uncomment if using unloading above)
-                        # if self.audio_model is None:
-                        #     print("Reloading model...")
-                        #     self.initialize_model()
-                        
-                        break
+
+                # Wait for activity.  Any registered hotkey press updates
+                # last_activity_time via the hotkey activity callback, so we
+                # simply watch that timestamp instead of polling a key.
+                while (not self.shutdown_event.is_set() and
+                       (datetime.now(timezone.utc) - self.last_activity_time).total_seconds()
+                       > self.config.inactivity_timeout):
                     time.sleep(0.5)
-                    now = datetime.now(timezone.utc)
-                    inactive_time = (now - self.last_activity_time).total_seconds()
-            
+
+                if not self.shutdown_event.is_set():
+                    print("Activity detected, resuming...")
+                    self.update_indicator_safe(False)  # back to 'ready'
+
             time.sleep(1)  # Check every second
 
-    def update_indicator_safe(self, is_recording, idle=False):
-        """Thread-safe indicator update using queue"""
-        self.ui_update_queue.put(('indicator', is_recording, idle))
+    def update_indicator_safe(self, is_recording=False, idle=False, loading=False):
+        """Thread-safe indicator update using queue (resolves to a state name)."""
+        if loading:
+            state = 'loading'
+        elif idle:
+            state = 'idle'
+        elif is_recording:
+            state = 'recording'
+        else:
+            state = 'ready'
+        self.ui_update_queue.put(('indicator', state))
     
     def process_ui_updates(self):
         """Process all pending UI updates from the queue"""
@@ -522,8 +643,7 @@ class VoiceRecognitionApp:
             while True:
                 update_type, *args = self.ui_update_queue.get_nowait()
                 if update_type == 'indicator':
-                    is_recording, idle = args
-                    update_indicator(self.canvas, self.indicator, is_recording, idle)
+                    update_indicator(self.canvas, self.indicator, args[0])
         except Empty:
             pass  # No more updates to process
         except Exception as e:
@@ -536,79 +656,163 @@ class VoiceRecognitionApp:
             self.debug_ui = DebugUI(self)
         self.debug_ui.toggle_debug_window()
     
+    def _request_shutdown(self):
+        """Ask the app to exit (bound to the status window's close button).
+
+        Setting the flag stops the worker threads; the Qt window also quits the
+        event loop, after which run() falls through to cleanup().
+        """
+        self.shutdown_event.set()
+
+    def _ui_tick(self):
+        """Per-tick work run on the GUI thread (driven by the window's timer).
+
+        Drains queued indicator updates and starts the global hotkeys once the
+        model is ready (kept on the main thread, matching the previous design).
+        """
+        self.process_ui_updates()
+        if self.ready and self.hotkeys is None:
+            self.setup_hotkeys()
+
     def create_ui(self):
-        """Create the UI overlay"""
-        self.root, self.canvas, self.indicator = create_overlay_window(debug_callback=self.toggle_debug_window)
-        self.update_indicator_safe(False)
+        """Create the QApplication and the main status + log window."""
+        hotkey_label = self.profile.hotkey_labels.get('toggle_recording', 'the hotkey')
+        self.qt_app, self.window, _ = create_overlay_window(
+            debug_callback=self.toggle_debug_window,
+            hotkey_label=hotkey_label,
+            on_close=self._request_shutdown,
+        )
+        # Historical aliases used by the queue-driven update helpers.
+        self.root = self.window
+        self.canvas = self.window
+        self.indicator = self.window
+        self.window.set_tick_callback(self._ui_tick)
+        self.update_indicator_safe(loading=True)  # amber until the model is ready
     
     def cleanup(self):
-        """Clean up resources"""
+        """Release resources. Each step is guarded so cleanup never raises
+        (a raised cleanup would otherwise trip the restart loop in main())."""
         print("Cleaning up resources...")
         self.shutdown_event.set()
-        
+
+        if self.hotkeys:
+            try:
+                self.hotkeys.stop()
+            except Exception:
+                pass
+
         if self.voice_converter and self.voice_converter.running:
-            self.voice_converter.stop()
-        
+            try:
+                self.voice_converter.stop()
+            except Exception:
+                pass
+
         if self.background_listener:
-            self.background_listener(wait_for_stop=False)
-        
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
-        
+            try:
+                self.background_listener(wait_for_stop=False)
+            except Exception:
+                pass
+
+        # Release CUDA memory only when CUDA was actually in use.
+        if self.profile and self.profile.device == "cuda":
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
         # Clean up debug UI
         if self.debug_ui:
-            self.debug_ui.cleanup()
+            try:
+                self.debug_ui.cleanup()
+            except Exception:
+                pass
             self.debug_ui = None
-        
-        if self.root:
-            self.root.destroy()
+
+        # Stop the log pump, restore stdout/stderr, close the window and quit.
+        if self.window is not None:
+            teardown = getattr(self.window, "teardown", None)
+            if teardown is not None:
+                try:
+                    teardown()
+                except Exception:
+                    pass
+            try:
+                self.window.close()
+            except Exception:
+                pass
+            self.window = None
+
+        if self.qt_app is not None:
+            try:
+                self.qt_app.quit()
+            except Exception:
+                pass
+
+        self.root = self.canvas = self.indicator = None
     
-    def run(self):
-        """Main application loop with threading"""
+    def _background_init(self):
+        """Load model + audio off the UI thread (keeps the window responsive).
+
+        MLX on a background thread is fine; the earlier crash was a pynput/Tk
+        text-input race, which we avoid by starting hotkeys from the main loop
+        only after it has been pumping (see run()).
+        """
         try:
-            # Initialize components
             self.initialize_model()
             self.initialize_audio()
             self.initialize_voice_converter()
+            self.ready = True
+            self.update_indicator_safe()  # 'loading' -> 'ready'
+
+            labels = self.profile.hotkey_labels
+            print("Voice recognition system ready.")
+            print(f"  {labels.get('toggle_recording', '?'):<22} Toggle speech-to-text recording")
+            print(f"  {labels.get('toggle_voice_changer', '?'):<22} Toggle voice changer (sharp/funny)")
+            print(f"  {labels.get('toggle_vc_routing', '?'):<22} Toggle voice changer output (cable / speaker)")
+        except Exception as exc:
+            print(f"Initialization failed: {exc}")
+            self.update_indicator_safe(idle=True)
+
+    def run(self):
+        """Build the Qt UI, start the worker threads, run the Qt event loop."""
+        threads = []
+        try:
+            # Show the window first (Qt paints reliably; no warm-up needed).
             self.create_ui()
-            
-            # Start worker threads
+
+            # Load the model + audio in the background so the window stays
+            # responsive and the log shows progress while it loads.
+            print("Loading model in the background…")
+            threading.Thread(target=self._background_init, daemon=True).start()
+
+            # Worker threads idle until recording starts.
             threads = [
                 threading.Thread(target=self.audio_processor_thread, daemon=True),
                 threading.Thread(target=self.transcription_worker_thread, daemon=True),
-                threading.Thread(target=self.keyboard_handler_thread, daemon=True),
                 threading.Thread(target=self.inactivity_monitor_thread, daemon=True)
             ]
-            
             for thread in threads:
                 thread.start()
-            
-            print("Voice recognition system ready.")
-            print("  Pause/Break   Toggle speech-to-text recording")
-            print("  Ctrl+F9   Toggle voice changer (sharp/funny)")
-            print("  Ctrl+F10  Toggle voice changer output (Virtual Cable / Speaker)")
 
-            
-            # Main UI loop - much more efficient than before
-            while not self.shutdown_event.is_set():
-                try:
-                    # Process any pending UI updates from worker threads
-                    self.process_ui_updates()
-                    
-                    # Update the tkinter UI
-                    self.root.update()
-                    time.sleep(0.005)  # Reduced sleep for better UI responsiveness
-                except tk.TclError:
-                    break  # Window was closed
-                except Exception as e:
-                    print(f"UI loop error: {e}")
-                    break
-            
-            # Wait for threads to finish
+            # Re-assert the hard-exit handler so Ctrl+C always quits. The
+            # window's 40ms timer keeps Python servicing signals during exec().
+            try:
+                signal.signal(signal.SIGINT, _force_quit)
+            except (ValueError, OSError):
+                pass
+
+            # Qt event loop on the main thread. Indicator updates and the
+            # deferred hotkey start run via the window's timer (_ui_tick).
+            # Returns when the window is closed (or QApplication.quit()).
+            self.qt_app.exec()
+
+            # Window closed → tell the workers to stop and wait briefly.
+            self.shutdown_event.set()
             for thread in threads:
                 if thread.is_alive():
                     thread.join(timeout=1.0)
-                    
+
         except KeyboardInterrupt:
             print("\nKeyboard interrupt detected. Exiting...")
         except Exception as e:
@@ -619,8 +823,13 @@ class VoiceRecognitionApp:
 def main():
     """Optimized main function"""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="medium", help="Model to use",
+    parser.add_argument("--model", default=None,
+                        help="Whisper model size. Defaults to the per-platform "
+                             "recommendation (small on Apple GPU, medium on CUDA, base on CPU).",
                         choices=["tiny", "base", "small", "medium", "large"])
+    parser.add_argument("--platform", default=None,
+                        choices=["auto", "windows", "macos", "linux"],
+                        help="Pin the platform profile. Default: auto-detect the OS.")
     parser.add_argument("--non_english", action='store_true',
                         help="Don't use the English model (if set, tries to auto-detect).")
     parser.add_argument("--energy_threshold", default=1000,
@@ -642,7 +851,14 @@ def main():
     
     args = parser.parse_args()
     config = VoiceConfig(args)
-    
+
+    # Make Ctrl+C / SIGTERM reliably quit (Tk + pynput can swallow signals).
+    signal.signal(signal.SIGINT, _force_quit)
+    try:
+        signal.signal(signal.SIGTERM, _force_quit)
+    except (ValueError, OSError):
+        pass
+
     # Simple restart loop for error recovery
     while True:
         try:

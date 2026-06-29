@@ -1,9 +1,20 @@
 numpy>=1.24
 SpeechRecognition>=3.10
 faster-whisper>=1.0
-torch>=2.0
 pyautogui>=0.9.54
-keyboard>=0.13.5
 pyaudio>=0.2.13
 sounddevice>=0.4.6
-customtkinter>=5.2.2
+# GUI toolkit. Qt renders reliably on macOS (unlike the deprecated system Tk).
+PySide6-Essentials>=6.6
+
+# --- Compute backends (auto-selected at runtime) ---------------------------
+# NVIDIA CUDA acceleration on Windows/Linux. Not used on macOS.
+torch>=2.0; sys_platform != "darwin"
+# Apple-GPU acceleration on Apple Silicon (the macOS equivalent of CUDA).
+mlx-whisper>=0.4; sys_platform == "darwin" and platform_machine == "arm64"
+
+# --- Global hotkeys (OS-specific backend) ----------------------------------
+# Windows: works without admin rights.
+keyboard>=0.13.5; sys_platform == "win32"
+# macOS/Linux: works WITHOUT sudo (needs Accessibility/Input-Monitoring perms).
+pynput>=1.7; sys_platform != "win32"

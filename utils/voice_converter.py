@@ -160,11 +160,19 @@ class VoiceConverter:
         pitch_semitones=7,
         sample_rate=48000,
         block_size=1024,
+        virtual_cable_keywords=None,
     ):
         if not SOUNDDEVICE_AVAILABLE:
             raise RuntimeError(
                 "sounddevice is not installed.  Run:  pip install sounddevice"
             )
+
+        # OS-specific names of virtual audio devices (VB-CABLE on Windows,
+        # BlackHole on macOS, …).  Falls back to the class default.
+        self.virtual_cable_keywords = (
+            list(virtual_cable_keywords) if virtual_cable_keywords
+            else list(self.VIRTUAL_CABLE_KEYWORDS)
+        )
 
         self.input_device = input_device
         self.output_device = output_device
@@ -338,10 +346,16 @@ class VoiceConverter:
         return result
 
     @classmethod
-    def find_virtual_cables(cls):
-        """Auto-detect virtual audio cable output devices."""
+    def find_virtual_cables(cls, keywords=None):
+        """Auto-detect virtual audio cable output devices.
+
+        Args:
+            keywords: Optional list of name fragments to match (e.g.
+                ``["blackhole"]`` on macOS).  Defaults to the class list.
+        """
+        keywords = keywords if keywords else cls.VIRTUAL_CABLE_KEYWORDS
         cables = []
         for idx, name in cls.get_output_devices():
-            if any(kw in name.lower() for kw in cls.VIRTUAL_CABLE_KEYWORDS):
+            if any(kw in name.lower() for kw in keywords):
                 cables.append((idx, name))
         return cables

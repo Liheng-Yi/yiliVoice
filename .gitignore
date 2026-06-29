@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 tempCodeRunnerFile.py
+
+# Virtual environments
+.venv/
+venv/
+env/

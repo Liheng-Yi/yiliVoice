@@ -1,177 +1,313 @@
-"""Smooth animated floating status overlay.
+"""Main status + log window, built on PySide6 (Qt).
 
-Uses customtkinter for a modern look and a lightweight hand-rolled
-animation on a tk.Canvas for a butter-smooth breathing/pulse effect.
+Qt renders reliably on macOS — unlike Apple's deprecated system Tcl/Tk 8.5,
+which left plain ``tk`` widgets unpainted (only native buttons showed). This
+module replaces the old Tk/customtkinter UI.
 
-Public API (kept backwards compatible):
-    create_overlay_window(debug_callback=None) -> (root, canvas, indicator)
-    update_indicator(canvas, indicator, is_recording, idle=False)
+Public API (kept compatible with the app):
+    create_overlay_window(debug_callback=None, hotkey_label="…", on_close=None)
+        -> (qt_app, window, window)
+    update_indicator(qt_app, window, state)   # state: ready/recording/idle/loading
+
+``window`` is returned twice so the app's historical ``(canvas, indicator)``
+pair both point at the same :class:`StatusWindow`.
 """
 
-import math
-import math
-import tkinter as tk
+import sys
+import queue as _queue
 
-import customtkinter as ctk
-
-
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
-class OverlayIndicator:
-    """Animated status indicator rendered on a tk.Canvas.
+# --- colours --------------------------------------------------------------- #
+BG = "#0f1115"
+PANEL_BG = "#0b0d11"
+FG = "#e5e7eb"
+MUTED = "#9ca3af"
 
-    States:
-        ready     - soft violet, very gentle breathing
-        recording - vibrant green, stronger pulse
-        idle      - muted red, almost still
-    """
+# state -> (dot colour, label text)
+STATE_INFO = {
+    "loading":   ("#fbbf24", "Loading model…"),
+    "ready":     ("#a78bfa", "Ready"),
+    "recording": ("#4ade80", "Recording…"),
+    "idle":      ("#f87171", "Idle (auto-paused)"),
+}
 
-    SIZE = 44
-    CHROMA_BG = "#010203"
+# Application-wide dark stylesheet (shared by the status + settings windows).
+APP_QSS = f"""
+QWidget {{
+    background-color: {BG};
+    color: {FG};
+    font-family: -apple-system, "Helvetica Neue", "Segoe UI", sans-serif;
+    font-size: 13px;
+}}
+QPushButton {{
+    background-color: #1f2937;
+    color: {FG};
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 6px 14px;
+}}
+QPushButton:hover {{ background-color: #374151; }}
+QPushButton:pressed {{ background-color: #4b5563; }}
+QPlainTextEdit, QTextEdit {{
+    background-color: {PANEL_BG};
+    color: #cbd5e1;
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+}}
+QComboBox {{
+    background-color: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-height: 24px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: #1f2937;
+    selection-background-color: #4f46e5;
+    border: 1px solid #374151;
+}}
+QTabWidget::pane {{ border: 1px solid #1f2937; border-radius: 8px; }}
+QTabBar::tab {{
+    background: #1f2937;
+    color: #cbd5e1;
+    padding: 7px 14px;
+    margin-right: 2px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}}
+QTabBar::tab:selected {{ background: #6366f1; color: white; }}
+QSlider::groove:horizontal {{
+    height: 5px; background: #374151; border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{ background: #6366f1; border-radius: 2px; }}
+QSlider::handle:horizontal {{
+    background: #a5b4fc; width: 14px; margin: -5px 0; border-radius: 7px;
+}}
+QScrollBar:vertical {{ background: {PANEL_BG}; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #374151; border-radius: 5px; min-height: 24px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+"""
 
-    PALETTE = {
-        "ready":     {"core": "#a78bfa", "glow": "#7c3aed"},
-        "recording": {"core": "#4ade80", "glow": "#16a34a"},
-        "idle":      {"core": "#f87171", "glow": "#991b1b"},
-    }
 
-    PULSE_AMPLITUDE = {
-        "ready":     0.06,
-        "recording": 0.22,
-        "idle":      0.03,
-    }
+class _LogTee:
+    """Write-through stdout/stderr wrapper that also feeds a queue."""
 
-    PULSE_SPEED = {
-        "ready":     0.035,
-        "recording": 0.09,
-        "idle":      0.02,
-    }
+    def __init__(self, original, q):
+        self._orig = original
+        self._q = q
 
-    def __init__(self, root, debug_callback=None):
-        self.root = root
-        self.state = "ready"
-        self.phase = 0.0
-        self._running = True
-
-        self.canvas = tk.Canvas(
-            root,
-            width=self.SIZE,
-            height=self.SIZE,
-            bg=self.CHROMA_BG,
-            highlightthickness=0,
-            bd=0,
-        )
-        self.canvas.pack()
-
-        # Layered circles for a soft glow falloff (drawn back-to-front)
-        self._layers = [
-            self.canvas.create_oval(0, 0, 0, 0, fill="", outline="")
-            for _ in range(4)
-        ]
-
-        if debug_callback:
-            self.canvas.bind("<Button-1>", lambda _e: debug_callback())
-
-        self._animate()
-
-    def set_state(self, is_recording: bool, idle: bool = False) -> None:
-        if idle:
-            self.state = "idle"
-        elif is_recording:
-            self.state = "recording"
-        else:
-            self.state = "ready"
-
-    def stop(self) -> None:
-        self._running = False
-
-    @staticmethod
-    def _lerp(c1: str, c2: str, t: float) -> str:
-        t = max(0.0, min(1.0, t))
-        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-        r = int(r1 + (r2 - r1) * t)
-        g = int(g1 + (g2 - g1) * t)
-        b = int(b1 + (b2 - b1) * t)
-        return f"#{r:02x}{g:02x}{b:02x}"
-
-    def _animate(self) -> None:
-        if not self._running:
-            return
-
+    def write(self, s):
+        if self._orig:
+            try:
+                self._orig.write(s)
+            except Exception:
+                pass
         try:
-            self.phase = (self.phase + self.PULSE_SPEED[self.state]) % (2 * math.pi)
-            pulse = (math.sin(self.phase) + 1.0) / 2.0
-            scale = 1.0 + self.PULSE_AMPLITUDE[self.state] * pulse
-
-            palette = self.PALETTE[self.state]
-            core = palette["core"]
-            glow = palette["glow"]
-
-            center = self.SIZE / 2
-            base_radii = [16.0, 12.0, 8.0, 5.0]
-            fade_steps = [0.82, 0.55, 0.2, 0.0]
-
-            for layer_id, base_r, fade in zip(self._layers, base_radii, fade_steps):
-                r = base_r * scale
-                color = self._lerp(glow if fade > 0.3 else core, self.CHROMA_BG, fade)
-                if fade == 0.0:
-                    color = core
-                self.canvas.coords(
-                    layer_id,
-                    center - r, center - r,
-                    center + r, center + r,
-                )
-                self.canvas.itemconfig(layer_id, fill=color)
-
-        except tk.TclError:
-            self._running = False
-            return
-
-        self.root.after(30, self._animate)
-
-
-def create_overlay_window(debug_callback=None):
-    """Create the floating status overlay and return (root, canvas, indicator)."""
-    root = ctk.CTk()
-    root.title("Voice Status")
-    root.configure(fg_color=OverlayIndicator.CHROMA_BG)
-    root.attributes('-topmost', True)
-    root.overrideredirect(True)
-
-    try:
-        root.attributes('-transparentcolor', OverlayIndicator.CHROMA_BG)
-    except tk.TclError:
-        pass
-
-    indicator = OverlayIndicator(root, debug_callback)
-
-    screen_width = root.winfo_screenwidth()
-    size = OverlayIndicator.SIZE
-    root.geometry(f'{size}x{size}+{(screen_width // 2) - size // 2}+0')
-
-    def keep_on_top():
-        try:
-            root.lift()
-            root.attributes('-topmost', True)
-        except tk.TclError:
-            return
-        root.after(1500, keep_on_top)
-
-    keep_on_top()
-
-    return root, indicator.canvas, indicator
-
-
-def update_indicator(canvas, indicator, is_recording, idle=False):
-    """Update the overlay state (thread-safe via tkinter main loop)."""
-    if isinstance(indicator, OverlayIndicator):
-        indicator.set_state(is_recording, idle)
-    else:
-        color = 'red' if idle else ('green' if is_recording else '#a78bfa')
-        try:
-            canvas.itemconfig(indicator, fill=color)
-        except tk.TclError:
+            self._q.put(s)
+        except Exception:
             pass
+
+    def flush(self):
+        if self._orig:
+            try:
+                self._orig.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+class StatusWindow(QtWidgets.QWidget):
+    """Status header (coloured dot + text) + a live, scrolling log."""
+
+    def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None):
+        super().__init__()
+        self.hotkey_label = hotkey_label
+        self._on_close = on_close
+        self._tick_cb = None
+        self.state = "loading"
+
+        self.setWindowTitle("yiliVoice")
+        self.setMinimumSize(440, 320)
+        self.resize(600, 460)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+
+        # ---- header: coloured dot + status text ----------------------- #
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(8)
+        self.dot = QtWidgets.QLabel("●")
+        self.status_label = QtWidgets.QLabel("Loading model…")
+        header.addWidget(self.dot)
+        header.addWidget(self.status_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        # ---- hotkey hint ---------------------------------------------- #
+        self.hint = QtWidgets.QLabel(
+            f"Press {hotkey_label} to start / stop recording."
+        )
+        self.hint.setStyleSheet(f"color: {MUTED};")
+        layout.addWidget(self.hint)
+
+        # ---- buttons -------------------------------------------------- #
+        btns = QtWidgets.QHBoxLayout()
+        if debug_callback:
+            settings_btn = QtWidgets.QPushButton("Settings")
+            settings_btn.clicked.connect(lambda: debug_callback())
+            btns.addWidget(settings_btn)
+        clear_btn = QtWidgets.QPushButton("Clear log")
+        clear_btn.clicked.connect(self.clear_log)
+        btns.addWidget(clear_btn)
+        btns.addStretch(1)
+        layout.addLayout(btns)
+
+        # ---- log ------------------------------------------------------ #
+        log_caption = QtWidgets.QLabel("Log")
+        log_caption.setStyleSheet(f"color: {MUTED}; font-weight: 600;")
+        layout.addWidget(log_caption)
+
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(2000)  # cap memory; drop oldest lines
+        mono = QtGui.QFont("Menlo")
+        mono.setStyleHint(QtGui.QFont.Monospace)
+        mono.setPointSize(11)
+        self.log.setFont(mono)
+        layout.addWidget(self.log, 1)
+
+        self._apply_state_styles()
+
+    # -- public API used by the app ------------------------------------- #
+
+    def set_tick_callback(self, cb):
+        """Register a callback run on the GUI thread every UI tick."""
+        self._tick_cb = cb
+
+    def set_state(self, state: str) -> None:
+        if state not in STATE_INFO:
+            return
+        self.state = state
+        self._apply_state_styles()
+
+    def _apply_state_styles(self) -> None:
+        color, text = STATE_INFO[self.state]
+        if self.state in ("ready", "idle"):
+            text = f"{text} — press {self.hotkey_label}"
+        self.dot.setStyleSheet(f"color: {color}; font-size: 20px;")
+        text_color = FG if self.state == "loading" else color
+        self.status_label.setStyleSheet(
+            f"color: {text_color}; font-size: 15px; font-weight: 700;"
+        )
+        self.status_label.setText(text)
+
+    def append_log(self, s: str) -> None:
+        """Append text to the log. Must be called on the GUI thread."""
+        if not s:
+            return
+        bar = self.log.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        self.log.moveCursor(QtGui.QTextCursor.End)
+        self.log.insertPlainText(s)
+        if at_bottom:
+            self.log.moveCursor(QtGui.QTextCursor.End)
+            self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    def clear_log(self) -> None:
+        self.log.clear()
+
+    # -- lifecycle ------------------------------------------------------ #
+
+    def closeEvent(self, event):
+        """Window close asks the app to shut down, then quits the Qt loop."""
+        if self._on_close:
+            try:
+                self._on_close()
+            except Exception:
+                pass
+        QtWidgets.QApplication.quit()
+        event.accept()
+
+
+def _ensure_app() -> QtWidgets.QApplication:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+    app.setApplicationName("yiliVoice")
+    app.setStyleSheet(APP_QSS)
+    return app
+
+
+def create_overlay_window(debug_callback=None, hotkey_label="the hotkey", on_close=None):
+    """Create the QApplication (if needed) and the main status/log window.
+
+    Returns ``(qt_app, window, window)``.
+    """
+    qt_app = _ensure_app()
+
+    window = StatusWindow(
+        hotkey_label=hotkey_label,
+        debug_callback=debug_callback,
+        on_close=on_close,
+    )
+    window.move(20, 40)  # top-left, clear of the menu bar
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+    # Mirror stdout/stderr into the on-screen log (keeps the terminal too).
+    log_q = _queue.Queue()
+    tee_out = _LogTee(sys.__stdout__, log_q)
+    tee_err = _LogTee(sys.__stderr__, log_q)
+    sys.stdout = tee_out
+    sys.stderr = tee_err
+
+    # A single GUI-thread timer drains the log queue and runs the app's
+    # per-tick work (indicator updates, deferred hotkey start). Keeping a
+    # short interval also lets Python service Ctrl+C while Qt's loop runs.
+    def _pump():
+        try:
+            while True:
+                window.append_log(log_q.get_nowait())
+        except _queue.Empty:
+            pass
+        if window._tick_cb is not None:
+            try:
+                window._tick_cb()
+            except Exception as exc:
+                # Never let a tick error kill the timer.
+                sys.__stderr__.write(f"UI tick error: {exc}\n")
+
+    timer = QtCore.QTimer(window)
+    timer.timeout.connect(_pump)
+    timer.start(40)
+    window._pump_timer = timer
+
+    def teardown():
+        """Stop the pump and restore stdio. Idempotent."""
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        if sys.stdout is tee_out:
+            sys.stdout = sys.__stdout__
+        if sys.stderr is tee_err:
+            sys.stderr = sys.__stderr__
+
+    window.teardown = teardown
+
+    return qt_app, window, window
+
+
+def update_indicator(qt_app, window, state):
+    """Update the status window to a named state (ready/recording/idle/loading).
+
+    Safe to call from the GUI-thread tick (which is how the app drives it).
+    """
+    if hasattr(window, "set_state"):
+        window.set_state(state)

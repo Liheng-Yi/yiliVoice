@@ -8,6 +8,13 @@ from .audio_utils import (
     strip_filler_words,
 )
 from .voice_converter import VoiceConverter, SOUNDDEVICE_AVAILABLE
+from .transcription import (
+    TranscriptionResult,
+    TranscriptionBackend,
+    create_backend,
+)
+from .hotkeys import HotkeyManager, create_hotkey_manager
+from .sound import play_cue
 
 __all__ = [
     'AudioBuffer',
@@ -18,4 +25,10 @@ __all__ = [
     'strip_filler_words',
     'VoiceConverter',
     'SOUNDDEVICE_AVAILABLE',
+    'TranscriptionResult',
+    'TranscriptionBackend',
+    'create_backend',
+    'HotkeyManager',
+    'create_hotkey_manager',
+    'play_cue',
 ]

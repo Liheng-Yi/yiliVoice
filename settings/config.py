@@ -3,6 +3,8 @@ import os
 import json
 from datetime import datetime
 
+from .platform_profile import build_profile, PROFILE_AUTO
+
 
 def normalize_filter_text(text: str) -> str:
     """Normalize a phrase for duplicate/filler checks."""
@@ -60,8 +62,23 @@ class VoiceConfig:
     """Configuration class to centralize settings"""
     
     def __init__(self, args):
-        self.model = args.model
+        # Load any previously-saved settings (best effort) so the platform
+        # override and mic selection persist across runs.
+        saved = self.load_from_file() or {}
+
+        # ---- platform profile (drives OS-specific behaviour) ----------- #
+        # Auto-detects the OS by default; can be pinned from the CLI or UI.
+        self.platform_override = (
+            getattr(args, "platform", None)
+            or saved.get("platform_override")
+            or PROFILE_AUTO
+        )
+        self.profile = build_profile(self.platform_override)
+
+        # Model: an explicit CLI choice wins, otherwise use the per-platform
+        # recommendation (e.g. 'small' on Apple-GPU MLX, 'medium' on CUDA).
         self.non_english = args.non_english
+        self.model = args.model or self.profile.recommended_model
         self.energy_threshold = args.energy_threshold
         self.record_timeout = args.record_timeout
         self.phrase_timeout = args.phrase_timeout
@@ -72,7 +89,9 @@ class VoiceConfig:
         self.threshold_adjustment = args.threshold_adjustment
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
-        self.selected_microphone_index = 1  # Device 1 as default
+        # Default to the system's first input device (index 0); a persisted
+        # selection overrides this.
+        self.selected_microphone_index = saved.get("selected_microphone_index", 0)
 
         # ------------------------------------------------------------------ #
         # Load external filter lists (filters.json)                           #
@@ -117,11 +136,18 @@ class VoiceConfig:
     # Persistence helpers                                                     #
     # ---------------------------------------------------------------------- #
 
+    def apply_profile(self, override):
+        """Re-pin the platform profile (called when the UI override changes)."""
+        self.platform_override = override or PROFILE_AUTO
+        self.profile = build_profile(self.platform_override)
+        return self.profile
+
     def to_dict(self):
         """Convert configuration to dictionary for saving"""
         return {
             'model': self.model,
             'non_english': self.non_english,
+            'platform_override': self.platform_override,
             'energy_threshold': self.energy_threshold,
             'record_timeout': self.record_timeout,
             'phrase_timeout': self.phrase_timeout,

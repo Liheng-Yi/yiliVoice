@@ -82,6 +82,7 @@ class TranscriptionBackend:
     name = "base"
     device_label = "unknown"
     model_ref = ""
+    supports_streaming = False  # can this backend produce live partial results?
 
     def transcribe(
         self,
@@ -92,6 +93,13 @@ class TranscriptionBackend:
         compression_ratio_threshold: float,
     ) -> TranscriptionResult:
         raise NotImplementedError
+
+    def open_stream(self):
+        """Open a live streaming session (only if ``supports_streaming``).
+
+        Returns an object with ``feed(audio_np)`` / ``text`` / ``close()``.
+        """
+        raise NotImplementedError("this backend does not support streaming")
 
     def warm_up(self) -> None:
         """Trigger model download / kernel compilation with a tiny clip."""
@@ -140,6 +148,39 @@ class FasterWhisperBackend(TranscriptionBackend):
         return TranscriptionResult(text, no_speech_prob)
 
 
+class ParakeetStream:
+    """A live Parakeet streaming session.
+
+    Wraps parakeet-mlx's ``transcribe_stream`` context manager (which yields a
+    ``StreamingParakeet``) so the app can push audio as it arrives and read the
+    running transcript.  The transcript's TAIL is not stable — the model
+    revises the last few words (and, rarely, earlier ones) as more audio comes
+    in — so the caller must only *commit* a held-back prefix, never the whole
+    string.  See :class:`utils.text_output.IncrementalTyper`.
+    """
+
+    def __init__(self, model, mx, context_size=(256, 256), depth=1):
+        self._mx = mx
+        # Enter the context manager manually so its lifetime spans the whole
+        # recording session (open on record-start, close on record-stop).
+        self._st = model.transcribe_stream(context_size=context_size, depth=depth)
+        self._st.__enter__()
+
+    def feed(self, audio_np) -> None:
+        """Push a 1-D float32 chunk (16 kHz) into the stream."""
+        self._st.add_audio(self._mx.array(audio_np))
+
+    @property
+    def text(self) -> str:
+        return (self._st.result.text or "").strip()
+
+    def close(self) -> None:
+        try:
+            self._st.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
 class ParakeetMLXBackend(TranscriptionBackend):
     """NVIDIA parakeet-tdt-0.6b on the Apple-Silicon GPU via parakeet-mlx.
 
@@ -148,9 +189,14 @@ class ParakeetMLXBackend(TranscriptionBackend):
     dictation clip in ~0.2 s where Whisper small.en needs ~0.34 s, with
     better accuracy.  It emits nothing on silence, so ``no_speech_prob`` is
     reported as 0.0 (never filtered).
+
+    It also supports true streaming (``supports_streaming = True``): the app
+    feeds audio as you speak and types the stabilized prefix live, so the
+    text is on screen almost the instant you stop talking.
     """
 
     name = BACKEND_PARAKEET
+    supports_streaming = True
 
     def __init__(self, non_english: bool):
         import mlx.core as mx  # raises if unavailable -> caller falls back
@@ -174,6 +220,21 @@ class ParakeetMLXBackend(TranscriptionBackend):
         results = self.model.generate(mel)
         text = results[0].text.strip() if results else ""
         return TranscriptionResult(text, 0.0)
+
+    def open_stream(self) -> ParakeetStream:
+        return ParakeetStream(self.model, self._mx)
+
+    def warm_up(self) -> None:
+        # Warm both the batch path and the streaming path (the first
+        # add_audio compiles kernels and would otherwise cost ~1.8 s mid-speech).
+        super().warm_up()
+        try:
+            stream = self.open_stream()
+            stream.feed(np.zeros(1600, dtype=np.float32))
+            _ = stream.text
+            stream.close()
+        except Exception as exc:
+            print(f"[Transcribe] Streaming warm-up skipped: {exc}")
 
 
 class MLXWhisperBackend(TranscriptionBackend):

@@ -84,13 +84,26 @@ The first run downloads the model weights (cached afterwards).
 
 Parakeet is preferred on Macs because it is both faster than Whisper
 small.en (~0.2 s vs ~0.34 s per phrase on an M3) and more accurate, and it
-emits nothing on silence (no "thank you" hallucinations). English uses
+emits nothing on true silence (no "thank you" hallucinations — though loud
+noise bursts can still yield brief interjections). English uses
 `parakeet-tdt-0.6b-v2`; `--non_english` switches to the 25-language v3
 checkpoint (for languages outside those 25, uninstall parakeet-mlx or pin
 Whisper by editing the profile).
 
 The active backend and accelerator are shown in the **System** tab of the
 control panel (click the floating overlay to open it).
+
+### Live streaming (Parakeet only)
+
+With Parakeet the app transcribes **as you speak** and types the text
+incrementally, so the words are on screen almost the moment you stop — there
+is no wait for a silence timer to fire. Because the model revises its last
+few words as more audio arrives, the app only commits words once they are a
+few back from the moving edge (hold-back) and never backspaces; on rare deep
+revisions an already-typed word is left as first heard rather than corrected.
+Tune the capture granularity with `--stream_block` (default 0.5 s; smaller is
+snappier but costs more per-chunk GPU work). Whisper/CPU backends keep the
+batch (transcribe-on-pause) path.
 
 ### Controls
 

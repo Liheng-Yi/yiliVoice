@@ -87,6 +87,9 @@ class VoiceConfig:
         self.no_speech_threshold = args.no_speech_threshold
         self.trailing_silence = args.trailing_silence
         self.threshold_adjustment = args.threshold_adjustment
+        # Streaming backends (Parakeet) capture in small blocks so text can be
+        # typed as you speak; smaller = snappier but more per-chunk overhead.
+        self.stream_block = getattr(args, "stream_block", 0.5)
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
         # Default to the system's first input device (index 0); a persisted

@@ -22,7 +22,7 @@ from utils import (
     strip_filler_words,
     VoiceConverter, SOUNDDEVICE_AVAILABLE,
     create_backend, create_hotkey_manager, play_cue,
-    TextTyper,
+    TextTyper, IncrementalTyper,
 )
 
 
@@ -70,7 +70,11 @@ class VoiceRecognitionApp:
         # backend pre-warms the macOS key layout, which must happen on the
         # main thread; typing itself then works from any worker thread.
         self.typer = TextTyper()
-        
+        # Live streaming output (used only when the backend supports streaming).
+        self.incremental_typer = IncrementalTyper(self.typer)
+        self.use_streaming = False   # set once the backend is known
+        self.stream = None           # active ParakeetStream during recording
+
         # Timing
         self.phrase_time = datetime.now(timezone.utc)
         self.last_activity_time = datetime.now(timezone.utc)
@@ -270,19 +274,101 @@ class VoiceRecognitionApp:
             self.activity_event.set()  # Signal activity
     
     def audio_processor_thread(self):
-        """Dedicated thread for processing audio data"""
+        """Dedicated thread for processing audio data (batch backends only).
+
+        When the backend streams (Parakeet), audio is consumed by
+        ``streaming_worker_thread`` instead, so this loop stands down to avoid
+        two consumers racing on ``data_queue``.
+        """
         while not self.shutdown_event.is_set():
             try:
+                if self.use_streaming:
+                    time.sleep(0.05)
+                    continue
                 # Process audio data from queue
                 if self.recording_event.is_set():
                     self.process_audio_queue()
                     self.check_phrase_completion()
-                
+
                 # Reduced sleep to prevent busy waiting but increase responsiveness
                 time.sleep(0.005)
-                
+
             except Exception as e:
                 print(f"Audio processor error: {e}")
+
+    def streaming_worker_thread(self):
+        """Live transcription for streaming backends (Parakeet).
+
+        Opens a stream when recording starts, feeds mic chunks as they arrive,
+        and types the stabilized prefix so text appears while you talk. On a
+        short pause it flushes the held-back tail; on stop it drains the last
+        audio, flushes, adds a separating space and closes the stream.
+        """
+        was_recording = False
+        last_feed = time.monotonic()
+        flushed_tail = False
+
+        while not self.shutdown_event.is_set():
+            try:
+                if not self.use_streaming:
+                    time.sleep(0.1)
+                    continue
+
+                recording = self.recording_event.is_set()
+
+                # --- start of a recording session -------------------------- #
+                if recording and self.stream is None:
+                    try:
+                        self.stream = self.backend.open_stream()
+                    except Exception as exc:
+                        print(f"[Streaming] open failed ({exc}); using batch mode.")
+                        self.use_streaming = False
+                        continue
+                    self.incremental_typer.reset()
+                    last_feed = time.monotonic()
+                    flushed_tail = False
+
+                # --- feed audio + type the stabilized prefix ---------------- #
+                if recording and self.stream is not None:
+                    fed = self._feed_stream()
+                    if fed:
+                        last_feed = time.monotonic()
+                        flushed_tail = False
+                        self.last_activity_time = datetime.now(timezone.utc)
+                        self.incremental_typer.update(self.stream.text)
+                    elif (not flushed_tail and
+                          time.monotonic() - last_feed > self.config.phrase_timeout):
+                        # Natural pause: surface the held-back trailing words.
+                        self.incremental_typer.flush_tail(self.stream.text)
+                        flushed_tail = True
+                    was_recording = True
+
+                # --- end of a recording session ----------------------------- #
+                elif was_recording and self.stream is not None:
+                    self._feed_stream()  # drain whatever arrived last
+                    self.incremental_typer.finalize(self.stream.text)
+                    self.stream.close()
+                    self.stream = None
+                    was_recording = False
+
+                time.sleep(0.02)
+            except Exception as exc:
+                print(f"[Streaming] worker error: {exc}")
+                time.sleep(0.1)
+
+    def _feed_stream(self) -> bool:
+        """Push all queued mic bytes into the active stream. Returns True if any."""
+        fed = False
+        try:
+            while True:
+                data = self.data_queue.get_nowait()
+                audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                if audio_np.size:
+                    self.stream.feed(audio_np)
+                    fed = True
+        except Empty:
+            pass
+        return fed
     
     def process_audio_queue(self):
         """Process all available audio data in queue"""
@@ -568,11 +654,14 @@ class VoiceRecognitionApp:
             # Clear the source reference to ensure it's fully released
             self.source = None
 
-            # Flush any remaining audio and queue it for transcription
-            self.process_audio_queue()
-            final_audio = self.audio_buffer.get_and_clear()
-            if final_audio:
-                self.enqueue_transcription(final_audio)
+            # Batch backends flush the buffer here; streaming backends let
+            # streaming_worker_thread drain data_queue and finalize on the
+            # recording-stopped edge, so skip the batch path when streaming.
+            if not self.use_streaming:
+                self.process_audio_queue()
+                final_audio = self.audio_buffer.get_and_clear()
+                if final_audio:
+                    self.enqueue_transcription(final_audio)
 
             print("Recording stopped...")
             self.update_indicator_safe(False)
@@ -591,10 +680,16 @@ class VoiceRecognitionApp:
                 # Create a fresh microphone source each time
                 self.source = self.create_fresh_microphone_source()
 
+                # Streaming wants small, frequent chunks so text appears while
+                # you talk; batch wants larger chunks for a clean phrase.
+                phrase_time_limit = (
+                    self.config.stream_block if self.use_streaming
+                    else self.config.record_timeout
+                )
                 self.background_listener = self.recorder.listen_in_background(
                     self.source,
                     self.record_callback,
-                    phrase_time_limit=self.config.record_timeout
+                    phrase_time_limit=phrase_time_limit
                 )
                 print("Recording started...")
                 self.update_indicator_safe(True)
@@ -778,11 +873,14 @@ class VoiceRecognitionApp:
         """
         try:
             self.initialize_model()
+            self.use_streaming = getattr(self.backend, "supports_streaming", False)
             self.initialize_audio()
             self.initialize_voice_converter()
             self.ready = True
             self.update_indicator_safe()  # 'loading' -> 'ready'
 
+            if self.use_streaming:
+                print("[Streaming] Live transcription enabled (types as you speak).")
             labels = self.profile.hotkey_labels
             print("Voice recognition system ready.")
             print(f"  {labels.get('toggle_recording', '?'):<22} Toggle speech-to-text recording")
@@ -804,10 +902,14 @@ class VoiceRecognitionApp:
             print("Loading model in the background…")
             threading.Thread(target=self._background_init, daemon=True).start()
 
-            # Worker threads idle until recording starts.
+            # Worker threads idle until recording starts. audio_processor +
+            # transcription_worker serve batch backends; streaming_worker
+            # serves streaming backends. Each stands down when the active
+            # backend isn't its kind, so they never both consume data_queue.
             threads = [
                 threading.Thread(target=self.audio_processor_thread, daemon=True),
                 threading.Thread(target=self.transcription_worker_thread, daemon=True),
+                threading.Thread(target=self.streaming_worker_thread, daemon=True),
                 threading.Thread(target=self.inactivity_monitor_thread, daemon=True)
             ]
             for thread in threads:
@@ -867,6 +969,9 @@ def main():
                         help="Adjust the model's threshold for detecting repetitions (1.0-2.0). Higher values are more aggressive in preventing loops.", type=float)
     parser.add_argument("--no_speech_threshold", default=0.6, type=float,
                         help="Drop transcriptions when Whisper reports a higher no-speech probability.")
+    parser.add_argument("--stream_block", default=0.5, type=float,
+                        help="Streaming backends (Parakeet): mic capture block in seconds. "
+                             "Smaller feels snappier but costs more per-chunk overhead.")
     
     args = parser.parse_args()
     config = VoiceConfig(args)

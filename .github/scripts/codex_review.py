@@ -117,6 +117,7 @@ def run_codex(prompt: str) -> str:
         "codex", "exec", "--sandbox", "read-only",
         "-c", f"model={MODEL}",
         "-c", "model_provider=flexai",
+        "-c", "model_providers.flexai.name=flexai-staging",
         "-c", f"model_providers.flexai.base_url={BASE_URL}",
         "-c", "model_providers.flexai.env_key=FLEXAI_API_KEY",
         "-c", "model_providers.flexai.wire_api=responses",

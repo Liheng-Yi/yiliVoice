@@ -3,7 +3,6 @@ import os
 import signal
 import numpy as np
 import speech_recognition as sr
-import pyautogui
 import threading
 import time
 from collections import deque
@@ -23,6 +22,7 @@ from utils import (
     strip_filler_words,
     VoiceConverter, SOUNDDEVICE_AVAILABLE,
     create_backend, create_hotkey_manager, play_cue,
+    TextTyper,
 )
 
 
@@ -63,6 +63,13 @@ class VoiceRecognitionApp:
         self.transcription_queue = Queue(maxsize=3)
         self.audio_buffer = AudioBuffer(config.max_buffer_size)
         self.transcription = deque(maxlen=100)  # Limit transcription history
+        self.last_chunk_size = 0     # bytes in the most recent mic chunk
+        self._validated_mic = None   # (resolved_index,) that last passed preflight
+
+        # Typed-text output. Constructed here (main thread) because the pynput
+        # backend pre-warms the macOS key layout, which must happen on the
+        # main thread; typing itself then works from any worker thread.
+        self.typer = TextTyper()
         
         # Timing
         self.phrase_time = datetime.now(timezone.utc)
@@ -123,24 +130,52 @@ class VoiceRecognitionApp:
             self.recorder.adjust_for_ambient_noise(temp_source)
         # temp_source is properly disposed of here
     
-    @staticmethod
-    def _resolve_input_device_index(requested):
-        """Return a usable input-device index (or None for the system default).
+    def _resolve_and_preflight(self, requested):
+        """Resolve a usable input-device index and verify it opens.
+
+        Returns ``(device_index, None)`` on success (``None`` index = system
+        default) or ``(None, error_message)`` on failure.
 
         A stale/invalid index — e.g. a saved ``0`` that points at an output
         device with no input channels — would make ``sr.Microphone`` fail to
         open. speech_recognition *swallows* that failure (it leaves
         ``source.stream = None`` and returns normally), so the background
-        listener later crashes with a cryptic ``NoneType`` error. We avoid that
-        by falling back to the default input device, then to the first device
-        that actually has input channels.
+        listener later crashes with a cryptic ``NoneType`` error. We avoid
+        that by test-opening candidates (requested → default input → any
+        input device) until one works.
+
+        Everything runs in ONE PyAudio session, and a device that passed
+        before skips the full enumeration — recording used to pay three
+        CoreAudio init/teardown cycles per hotkey press, which delayed
+        capture enough to clip the first word.
         """
         try:
             import pyaudio
         except Exception:
-            return requested
+            return requested, None  # can't test; let the normal path try
+
         pa = pyaudio.PyAudio()
         try:
+            def opens(idx):
+                kwargs = dict(format=pyaudio.paInt16, channels=1, rate=16000,
+                              input=True, frames_per_buffer=1024)
+                if idx is not None:
+                    kwargs["input_device_index"] = idx
+                try:
+                    stream = pa.open(**kwargs)
+                    stream.close()
+                    return True, None
+                except Exception as exc:
+                    return False, str(exc)
+
+            # Fast path: the previously validated device — just confirm it
+            # still opens (catches unplugging / a revoked permission).
+            if self._validated_mic is not None and self._validated_mic[0] == requested:
+                ok, _ = opens(requested)
+                if ok:
+                    return requested, None
+                self._validated_mic = None  # device went away; re-resolve
+
             count = pa.get_device_count()
 
             def is_input(i):
@@ -149,50 +184,35 @@ class VoiceRecognitionApp:
                 except Exception:
                     return False
 
+            candidates = []
             if requested is not None and 0 <= requested < count and is_input(requested):
-                return requested
-
+                candidates.append(requested)
             try:
                 default_idx = pa.get_default_input_device_info().get("index")
             except Exception:
                 default_idx = None
-            if default_idx is not None and is_input(default_idx):
-                print(f"Microphone index {requested} is not an input device; "
-                      f"falling back to default input [{default_idx}].")
-                return default_idx
-
+            if default_idx is not None and is_input(default_idx) and default_idx not in candidates:
+                candidates.append(default_idx)
             for i in range(count):
-                if is_input(i):
-                    print(f"Microphone index {requested} unusable; using input [{i}].")
-                    return i
+                if is_input(i) and i not in candidates:
+                    candidates.append(i)
 
-            print("No input devices with capture channels were found.")
-            return None
-        finally:
-            pa.terminate()
+            last_err = None
+            for idx in candidates:
+                ok, err = opens(idx)
+                if ok:
+                    if idx != requested:
+                        print(f"Microphone index {requested} unusable; using input [{idx}].")
+                    self._validated_mic = (idx,)
+                    return idx, None
+                last_err = err
 
-    @staticmethod
-    def _microphone_opens(device_index):
-        """Best-effort test that an input stream can actually be opened.
-
-        Returns ``(ok, error_message)``. Catches the real failure (bad device
-        or, on macOS, a missing Microphone permission) that SR would otherwise
-        hide."""
-        try:
-            import pyaudio
-        except Exception as exc:
-            return True, None  # can't test; let the normal path try
-        pa = pyaudio.PyAudio()
-        try:
-            kwargs = dict(format=pyaudio.paInt16, channels=1, rate=16000,
-                          input=True, frames_per_buffer=1024)
-            if device_index is not None:
-                kwargs["input_device_index"] = device_index
-            stream = pa.open(**kwargs)
-            stream.close()
-            return True, None
-        except Exception as exc:
-            return False, str(exc)
+            # Last resort: the system default without an explicit index.
+            ok, err = opens(None)
+            if ok:
+                self._validated_mic = (None,)
+                return None, None
+            return None, last_err or err or "no usable input devices found"
         finally:
             pa.terminate()
 
@@ -203,17 +223,16 @@ class VoiceRecognitionApp:
         device or a missing macOS Microphone permission raises here (caught by
         toggle_recording) instead of crashing the background listener thread.
         """
-        device_index = self._resolve_input_device_index(self.config.selected_microphone_index)
-        # Remember the resolved choice so the UI + saved config reflect reality.
-        self.config.selected_microphone_index = device_index
-
-        ok, err = self._microphone_opens(device_index)
-        if not ok:
+        requested = self.config.selected_microphone_index
+        device_index, err = self._resolve_and_preflight(requested)
+        if err is not None:
             raise OSError(
-                f"could not open microphone (device {device_index}): {err}. "
+                f"could not open microphone (device {requested}): {err}. "
                 "On macOS, grant Microphone access in "
                 "System Settings → Privacy & Security → Microphone."
             )
+        # Remember the resolved choice so the UI + saved config reflect reality.
+        self.config.selected_microphone_index = device_index
 
         if device_index is not None:
             print(f"Creating microphone with device index: {device_index}")
@@ -272,6 +291,7 @@ class VoiceRecognitionApp:
             while True:
                 data = self.data_queue.get_nowait()
                 self.audio_buffer.append(data)
+                self.last_chunk_size = len(data)
                 audio_added = True
         except Empty:
             pass
@@ -283,57 +303,53 @@ class VoiceRecognitionApp:
     def check_phrase_completion(self):
         """Check if a phrase is complete and queue audio for transcription.
 
-        Fix: last word/digit cut-off
-        ────────────────────────────
-        Root causes addressed here:
+        Endpointing strategy
+        ────────────────────
+        speech_recognition delivers a chunk for one of two reasons, and the
+        chunk's length tells us which:
 
-        F2 – Race condition: the extension condition was `phrase_time > last_audio_time`
-             which is False when the last chunk arrives at the exact moment the
-             phrase_timeout fires.  Changed to `>=` so any tie also extends the window.
+        * SHORTER than ``record_timeout`` → the recognizer heard
+          ``pause_threshold`` (0.5 s) of silence and endpointed the phrase
+          itself.  No more audio can be in flight, so the phrase can close
+          after just ``phrase_timeout`` of quiet.
+        * FULL length → the chunk was cut mid-speech by the
+          ``phrase_time_limit``; the speaker may still be talking and the next
+          delivery can take up to ``record_timeout`` more, so we wait that
+          long plus a margin before declaring the phrase done.
 
-        F3 – phrase_timeout < record_timeout: audio chunks can be up to `record_timeout`
-             seconds long.  We use `max(phrase_timeout, record_timeout)` so we never
-             declare a phrase done before a full chunk could have arrived.
-
-        F4 – Final drain happens BEFORE the buffer snapshot so any audio that arrived
-             during the very last polling cycle is captured.
+        This replaces the old stacked timers — ``max(phrase_timeout,
+        record_timeout)`` followed by a fixed 1.2 s trailing wait, ~2.7 s of
+        latency on every utterance — with a gate that is usually just
+        ``phrase_timeout``.  The last-word-cut-off guarantee is preserved: it
+        comes from the recognizer's own pause detection, not from waiting.
         """
-        now = datetime.now(timezone.utc)
-        silent_duration = now - self.phrase_time
+        if len(self.audio_buffer) == 0:
+            return
 
-        # F3: effective timeout must be at least one full audio-chunk long
-        effective_phrase_timeout = max(
-            self.config.phrase_timeout,
-            self.config.record_timeout
-        )
+        silence = (datetime.now(timezone.utc) - self.phrase_time).total_seconds()
 
-        if (silent_duration > timedelta(seconds=effective_phrase_timeout) and
-                len(self.audio_buffer) > 0):
+        full_chunk_bytes = self.config.record_timeout * 16000 * 2  # 16-bit mono @ 16 kHz
+        if self.last_chunk_size >= full_chunk_bytes * 0.9:
+            gate = self.config.record_timeout + 0.4  # cut mid-speech; next chunk may be pending
+        else:
+            gate = self.config.phrase_timeout        # recognizer already saw the pause
 
-            # Wait for trailing silence, checking for new audio periodically.
-            # This ensures we capture late-arriving audio chunks (e.g. the last word).
-            last_audio_time = self.phrase_time
-            wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
+        if silence <= gate:
+            return
 
-            while datetime.now(timezone.utc) < wait_until:
-                time.sleep(0.05)  # poll every 50 ms
-                self.process_audio_queue()
-
-                # F2: use >= so a chunk that arrived exactly at the timeout still
-                #     extends the capture window.
-                if self.phrase_time >= last_audio_time and self.phrase_time > (
-                        now - timedelta(seconds=effective_phrase_timeout)):
-                    if self.phrase_time > last_audio_time:  # genuinely new audio
-                        last_audio_time = self.phrase_time
-                        wait_until = datetime.now(timezone.utc) + timedelta(
-                            seconds=self.config.trailing_silence)
-
-            # F4: final unconditional drain BEFORE taking the buffer snapshot
+        # Final short drain: catch audio that raced in during this polling
+        # cycle before the buffer snapshot.
+        wait_until = datetime.now(timezone.utc) + timedelta(seconds=self.config.trailing_silence)
+        while datetime.now(timezone.utc) < wait_until:
+            time.sleep(0.05)  # poll every 50 ms
             self.process_audio_queue()
+            if (datetime.now(timezone.utc) - self.phrase_time).total_seconds() <= gate:
+                return  # new audio arrived — the phrase continues
 
-            audio_bytes = self.audio_buffer.get_and_clear()
-            if audio_bytes:
-                self.enqueue_transcription(audio_bytes)
+        self.process_audio_queue()
+        audio_bytes = self.audio_buffer.get_and_clear()
+        if audio_bytes:
+            self.enqueue_transcription(audio_bytes)
 
     def enqueue_transcription(self, audio_bytes):
         """Queue audio bytes for background transcription, dropping the oldest if needed."""
@@ -430,7 +446,7 @@ class VoiceRecognitionApp:
 
         print(f"Outputting: '{text}'")
         self.transcription.append(text)
-        pyautogui.write(text + " ", interval=0.01)
+        self.typer.type(text + " ")
     
     def initialize_voice_converter(self):
         """Create the voice converter instance (does not start streaming)."""
@@ -491,7 +507,7 @@ class VoiceRecognitionApp:
         """On macOS, verify (and prompt for) the TWO permissions hotkeys need.
 
         Input Monitoring lets the listener *receive* the hotkey; Accessibility
-        lets pyautogui *type* the transcribed text. They are independent — a
+        lets the typing backend *type* the transcribed text. They are independent — a
         missing Input Monitoring grant makes the hotkey silently do nothing
         even when Accessibility is on — so we check both.
         """
@@ -568,6 +584,7 @@ class VoiceRecognitionApp:
             self.transcription = deque(maxlen=100)
             self._drain_queue(self.data_queue)
             self.audio_buffer.get_and_clear()
+            self.last_chunk_size = 0
             self.phrase_time = datetime.now(timezone.utc)
 
             try:
@@ -586,6 +603,7 @@ class VoiceRecognitionApp:
                 print(f"Error starting recording: {e}")
                 self.recording_event.clear()
                 self.source = None
+                self._validated_mic = None  # force a full re-resolve next time
                 self.update_indicator_safe(False)  # back to 'ready', not stuck
                 # Try to reinitialize audio if there's an issue
                 try:
@@ -836,13 +854,14 @@ def main():
                         help="Energy level for mic to detect.", type=int)
     parser.add_argument("--record_timeout", default=1.5,
                         help="Length of audio buffer in seconds for each chunk.", type=float)
-    parser.add_argument("--phrase_timeout", default=1.0,
-                        help="Silence gap (seconds) to consider a phrase ended.", type=float)
+    parser.add_argument("--phrase_timeout", default=0.8,
+                        help="Silence gap (seconds) after a pause-ended chunk to consider "
+                             "a phrase done.", type=float)
     parser.add_argument("--volume_threshold", default=0.008,
                         help="Min volume level to consider valid audio in the buffer.", type=float)
-    parser.add_argument("--trailing_silence", default=1.2,
-                        help="Extra silence to capture at the end of phrases (seconds). "
-                             "Should be >= record_timeout to avoid cutting off the last word.",
+    parser.add_argument("--trailing_silence", default=0.25,
+                        help="Final drain window (seconds) to catch audio that races in "
+                             "while a phrase is being finalized.",
                         type=float)
     parser.add_argument("--threshold_adjustment", default=1.0,
                         help="Adjust the model's threshold for detecting repetitions (1.0-2.0). Higher values are more aggressive in preventing loops.", type=float)

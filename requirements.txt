@@ -10,8 +10,15 @@ PySide6-Essentials>=6.6
 # --- Compute backends (auto-selected at runtime) ---------------------------
 # NVIDIA CUDA acceleration on Windows/Linux. Not used on macOS.
 torch>=2.0; sys_platform != "darwin"
-# Apple-GPU acceleration on Apple Silicon (the macOS equivalent of CUDA).
+# Preferred Apple-Silicon engine: NVIDIA parakeet-tdt via MLX — faster AND
+# more accurate than Whisper for dictation. Needs Python >= 3.10
+# (brew install python@3.12, then build the venv with it).
+parakeet-mlx>=0.5; sys_platform == "darwin" and platform_machine == "arm64" and python_version >= "3.10"
+# Apple-GPU Whisper fallback on Apple Silicon (the macOS equivalent of CUDA).
 mlx-whisper>=0.4; sys_platform == "darwin" and platform_machine == "arm64"
+# mlx-whisper pulls in numba; keep it modern so it resolves alongside the
+# numpy 2.x that parakeet-mlx requires (old numba can't build on py3.12).
+numba>=0.62; sys_platform == "darwin" and platform_machine == "arm64" and python_version >= "3.10"
 
 # --- Global hotkeys (OS-specific backend) ----------------------------------
 # Windows: works without admin rights.

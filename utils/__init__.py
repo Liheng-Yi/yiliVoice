@@ -15,6 +15,7 @@ from .transcription import (
 )
 from .hotkeys import HotkeyManager, create_hotkey_manager
 from .sound import play_cue
+from .text_output import TextTyper, IncrementalTyper, stable_prefix
 
 __all__ = [
     'AudioBuffer',
@@ -31,4 +32,7 @@ __all__ = [
     'HotkeyManager',
     'create_hotkey_manager',
     'play_cue',
+    'TextTyper',
+    'IncrementalTyper',
+    'stable_prefix',
 ]

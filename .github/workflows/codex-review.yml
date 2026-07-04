@@ -1,0 +1,43 @@
+name: Codex PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One review per PR at a time; cancel the previous run when new commits land.
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Skip PRs from forks: on a self-hosted runner they would run untrusted code,
+    # and forked PRs don't get access to the FLEXAI_API_KEY secret anyway.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure codex + gh are on PATH
+        run: |
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          export PATH="/opt/homebrew/bin:$PATH"
+          command -v codex >/dev/null 2>&1 || npm install -g @openai/codex
+          codex --version
+          gh --version | head -1
+
+      - name: Run Codex review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLEXAI_API_KEY: ${{ secrets.FLEXAI_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Override the model here if you like, e.g. gpt-oss-120b:
+          # CODEX_MODEL: gpt-oss-120b
+        run: python3 .github/scripts/codex_review.py

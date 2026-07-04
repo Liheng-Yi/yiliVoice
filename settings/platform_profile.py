@@ -44,6 +44,7 @@ OS_DISPLAY_NAMES = {
 # Backend keys --------------------------------------------------------------
 BACKEND_FASTER_WHISPER = "faster-whisper"
 BACKEND_MLX = "mlx"
+BACKEND_PARAKEET = "parakeet"
 
 
 # --------------------------------------------------------------------------- #
@@ -75,6 +76,16 @@ def _mlx_whisper_available() -> bool:
         return False
 
 
+def _parakeet_available() -> bool:
+    """Cheap check (no import side-effects) for the parakeet_mlx package."""
+    if not is_apple_silicon():
+        return False
+    try:
+        return importlib.util.find_spec("parakeet_mlx") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _cuda_available() -> tuple[bool, str]:
     """Return (available, gpu_name).  Safe if torch is missing."""
     try:
@@ -92,9 +103,23 @@ def _cuda_available() -> tuple[bool, str]:
 def detect_acceleration() -> dict:
     """Pick the best *available* transcription backend for this host.
 
-    Order of preference: Apple-GPU MLX → NVIDIA CUDA → CPU.  This is based
-    on real hardware/packages, never on a pinned profile.
+    Order of preference: Apple-GPU Parakeet → Apple-GPU MLX Whisper →
+    NVIDIA CUDA → CPU.  This is based on real hardware/packages, never on
+    a pinned profile.
+
+    Parakeet (NVIDIA parakeet-tdt-0.6b via MLX) is preferred on Apple
+    Silicon: it is both faster than Whisper small.en (~0.2 s vs ~0.34 s for
+    a 5 s clip on an M3) and substantially more accurate (leads the Open ASR
+    leaderboard), and it does not hallucinate text on silence.
     """
+    if _parakeet_available():
+        return {
+            "backend": BACKEND_PARAKEET,
+            "device": "gpu",
+            "compute_type": "bfloat16",
+            "accelerator_label": "Apple GPU · Parakeet MLX",
+        }
+
     if _mlx_whisper_available():
         return {
             "backend": BACKEND_MLX,
@@ -208,10 +233,14 @@ _OS_TABLE = {
 
 
 def _recommended_model(backend: str, device: str) -> str:
-    """Pick a sensible default Whisper model size for the accelerator."""
+    """Pick a sensible default Whisper model size for the accelerator.
+
+    Parakeet ignores Whisper sizes (it is a single fixed model); the size
+    returned for it only matters if the backend falls back to Whisper.
+    """
     if device == "cuda":
         return "medium"
-    if backend == BACKEND_MLX:
+    if backend in (BACKEND_MLX, BACKEND_PARAKEET):
         return "small"   # snappy + accurate on Apple GPU
     return "base"        # CPU: keep it responsive
 

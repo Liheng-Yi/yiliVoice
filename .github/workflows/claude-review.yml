@@ -1,0 +1,61 @@
+# Claude PR review — reviews ONLY my own PRs, billed to my personal Max
+# subscription (CLAUDE_CODE_OAUTH_TOKEN secret from `claude setup-token`).
+#
+# Scope guard: the job-level `if:` skips every PR not authored by one of my
+# accounts, so teammates' PRs are never reviewed and never spend my quota.
+#
+# Runs on GitHub-hosted runners (the Claude API is public — no self-hosted
+# runner needed, unlike the Codex/staging-gateway bot in codex-review.yml).
+name: Claude PR Review
+
+on:
+  pull_request:
+    # opened + ready_for_review only (NOT synchronize): one review per PR,
+    # not one per push — keeps Max-plan usage low. Add "synchronize" here to
+    # re-review every push.
+    types: [opened, ready_for_review]
+
+# A newer event for the same PR supersedes a still-running review.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  review:
+    # ONLY my PRs — everyone else's are left alone.
+    if: contains(fromJSON('["liheng-flexai", "Liheng-Yi"]'), github.event.pull_request.user.login)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. Get the diff with `gh pr diff`. Focus on
+            real problems in the changed lines: bugs, incorrect logic, security
+            issues, race conditions, and error paths. Do not nitpick style.
+
+            Post the review as a single PR comment via
+            `gh pr comment <number> --body-file <file>`, structured as:
+            - **Verdict** — approve / needs changes
+            - **Findings** — each with file:line, severity, and a suggested fix
+            - If there are no findings, say so briefly.
+
+            Start the comment with the heading `## 🤖 Claude review`.
+          claude_args: |
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Read,Grep,Glob"

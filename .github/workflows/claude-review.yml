@@ -63,4 +63,4 @@ jobs:
 
             Start the comment with the heading `## 🤖 Claude review`.
           claude_args: |
-            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Read,Grep,Glob"
+            --allowedTools "Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Read,Grep,Glob"

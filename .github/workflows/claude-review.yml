@@ -66,3 +66,7 @@ jobs:
             Start the comment with the heading `## 🤖 Claude review`.
           claude_args: |
             --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Read,Grep,Glob"
+
+      - name: Dump Claude execution log (TEMP debug)
+        if: always()
+        run: cat /home/runner/work/_temp/claude-execution-output.json 2>/dev/null || echo "(no execution log)"

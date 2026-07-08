@@ -163,3 +163,5 @@ The Voice Changer tab shows the exact steps for your OS.
 - `settings/platform_profile.py` — single source of truth for per-OS behavior
 - `utils/transcription.py` — backend abstraction (faster-whisper / MLX)
 - `utils/hotkeys.py` — global-hotkey abstraction (keyboard / pynput)
+
+<!-- smoke test: claude own-PR review bot -->

@@ -47,6 +47,8 @@ jobs:
           # Use the workflow's own token instead of the Claude GitHub App
           # (app not installed on this repo). Comments post as github-actions[bot].
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # TEMP debug: surface the SDK error text in logs
+          show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}

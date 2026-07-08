@@ -47,8 +47,6 @@ jobs:
           # Use the workflow's own token instead of the Claude GitHub App
           # (app not installed on this repo). Comments post as github-actions[bot].
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # TEMP debug: surface the SDK error text in logs
-          show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -66,7 +64,3 @@ jobs:
             Start the comment with the heading `## 🤖 Claude review`.
           claude_args: |
             --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Read,Grep,Glob"
-
-      - name: Dump Claude execution log (TEMP debug)
-        if: always()
-        run: cat /home/runner/work/_temp/claude-execution-output.json 2>/dev/null || echo "(no execution log)"

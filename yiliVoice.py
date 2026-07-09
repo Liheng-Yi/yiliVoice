@@ -730,23 +730,44 @@ class VoiceRecognitionApp:
         if self.shutdown_event.wait(timeout=2.0):
             return
         while not self.shutdown_event.is_set():
+            # Fetch the two sources CONCURRENTLY so the reliable ccusage cost
+            # (~13s) is never gated behind the slower/flakier `claude -p /usage`
+            # call — each updates the dot independently as soon as it returns.
+            workers = []
             if self.show_usage:
-                try:
-                    session, week, reset = fetch_usage()
-                    if session is not None or week is not None or reset is not None:
-                        self.update_usage_safe(session, week, reset)
-                except Exception as exc:
-                    print(f"[Usage] limit poll error: {exc}")
+                workers.append(threading.Thread(target=self._poll_usage, daemon=True))
             if self.show_cost:
-                try:
-                    today, month = fetch_ccusage()
-                    if today is not None or month is not None:
-                        self.update_cost_safe(today, month)
-                except Exception as exc:
-                    print(f"[Usage] cost poll error: {exc}")
+                workers.append(threading.Thread(target=self._poll_cost, daemon=True))
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join(timeout=95)
             # Wait for the refresh interval, but wake early on a manual refresh.
             self.usage_refresh_event.wait(timeout=max(30, self.config.usage_refresh))
             self.usage_refresh_event.clear()
+
+    def _poll_usage(self):
+        """Fetch session/weekly limit % + 5h reset via `claude -p /usage`."""
+        try:
+            session, week, reset = fetch_usage()
+            if session is not None or week is not None or reset is not None:
+                self.update_usage_safe(session, week, reset)
+            else:
+                print("[Usage] /usage returned no panel (CLI print mode is flaky); "
+                      "limit bars stay blank this cycle.")
+        except Exception as exc:
+            print(f"[Usage] limit poll error: {exc}")
+
+    def _poll_cost(self):
+        """Fetch today / last-30-day spend via `bunx ccusage daily --json`."""
+        try:
+            today, month = fetch_ccusage()
+            if today is not None or month is not None:
+                self.update_cost_safe(today, month)
+            else:
+                print("[Usage] ccusage returned no data (is `bunx` on PATH?).")
+        except Exception as exc:
+            print(f"[Usage] cost poll error: {exc}")
 
     def inactivity_monitor_thread(self):
         """Monitor for inactivity and handle auto-shutdown"""

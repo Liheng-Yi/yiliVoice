@@ -106,7 +106,7 @@ class StatusWindow(QtWidgets.QWidget):
     SIZE = 30  # dot-only window is SIZE×SIZE; the dot is inset a few px
 
     # Layout when the meter panel is shown (below the dot).
-    USAGE_W = 108
+    USAGE_W = 96
     DOT_D = 26                      # dot diameter in panel mode
     _PAD = 5
     _ROW_H = 15
@@ -254,7 +254,11 @@ class StatusWindow(QtWidgets.QWidget):
 
     @staticmethod
     def _fmt_cost(v):
-        return "…" if v is None else f"${v:,.2f}"
+        if v is None:
+            return "…"
+        if v >= 1000:
+            return f"${v / 1000:.2f}k"  # 4252.0 -> "$4.25k"
+        return f"${v:.2f}"
 
     def append_log(self, s: str) -> None:
         """No on-screen log in dot mode — output goes to the terminal."""

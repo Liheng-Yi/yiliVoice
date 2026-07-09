@@ -45,6 +45,25 @@ def parse_usage(text: str):
     return session, week
 
 
+# The "current session" line is the 5-hour rolling window; grab its reset time.
+_SESSION_LINE_RE = re.compile(r"current session:[^\n]*", re.IGNORECASE)
+_CLOCK_RE = re.compile(r"(\d{1,2}:\d{2}\s*[ap]\.?m\.?)", re.IGNORECASE)
+
+
+def parse_session_reset(text: str):
+    """Return when the 5-hour session window resets, e.g. ``"8:49pm"`` (or None)."""
+    text = text or ""
+    m = _SESSION_LINE_RE.search(text)
+    if not m:
+        return None
+    line = m.group(0)
+    clock = _CLOCK_RE.search(line)
+    if clock:
+        return re.sub(r"\s+", "", clock.group(1)).lower()  # "8:49 pm" -> "8:49pm"
+    tail = re.search(r"resets\s+(.+?)(?:\s*\(|$)", line, re.IGNORECASE)
+    return tail.group(1).strip() if tail else None
+
+
 def claude_executable():
     """Absolute path to the ``claude`` CLI, or ``None`` if not on PATH."""
     return shutil.which("claude")
@@ -55,14 +74,14 @@ def claude_available() -> bool:
 
 
 def fetch_usage(timeout: float = 30.0):
-    """Run the CLI and return ``(session_pct, week_pct)``.
+    """Run the CLI once and return ``(session_pct, week_pct, session_reset)``.
 
-    Returns ``(None, None)`` if the CLI is missing, times out, or errors — the
-    caller treats that as "no data yet" and keeps the last known value.
+    Returns ``(None, None, None)`` if the CLI is missing, times out, or errors —
+    the caller treats that as "no data yet" and keeps the last known value.
     """
     exe = claude_executable()
     if not exe:
-        return (None, None)
+        return (None, None, None)
     try:
         proc = subprocess.run(
             [exe, "-p", "/usage", "--no-session-persistence"],
@@ -71,13 +90,17 @@ def fetch_usage(timeout: float = 30.0):
             timeout=timeout,
         )
     except Exception:
-        return (None, None)
+        return (None, None, None)
 
-    session, week = parse_usage(proc.stdout)
-    if session is None and week is None:
+    out = proc.stdout
+    session, week = parse_usage(out)
+    reset = parse_session_reset(out)
+    if session is None and week is None and reset is None:
         # Some builds route the panel to stderr; try that too.
-        session, week = parse_usage(proc.stderr)
-    return (session, week)
+        out = proc.stderr
+        session, week = parse_usage(out)
+        reset = parse_session_reset(out)
+    return (session, week, reset)
 
 
 # --------------------------------------------------------------------------- #

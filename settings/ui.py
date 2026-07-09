@@ -135,6 +135,7 @@ class StatusWindow(QtWidgets.QWidget):
         self._usage_click_cb = usage_click_callback
         self.usage_session = None    # int 0-100 or None (not fetched)
         self.usage_week = None
+        self.session_reset = None    # 5-hour window reset time, e.g. "8:49pm"
         self.cost_today = None        # float USD or None
         self.cost_month = None        # rolling last-30-days USD
         self._press_local = None     # widget-local press point (dot vs panel)
@@ -175,8 +176,14 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_tooltip()
 
     def _dot_rect(self):
-        """(x, y, diameter) of the status dot within the window."""
+        """(x, y, diameter) of the status dot within the window.
+
+        When the limit half is shown the dot sits top-left, leaving the
+        top-right of the header for the session reset time; otherwise centered.
+        """
         if self._has_panel:
+            if self.show_usage:
+                return (self._PAD, self._PAD, self.DOT_D)
             return ((self.USAGE_W - self.DOT_D) // 2, self._PAD, self.DOT_D)
         return (0, 0, self.SIZE)
 
@@ -238,10 +245,11 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_tooltip()
         self.update()  # trigger repaint
 
-    def set_usage(self, session, week) -> None:
-        """Update the session / weekly limit percentages (ints or None)."""
+    def set_usage(self, session, week, session_reset=None) -> None:
+        """Update session/weekly limit % (ints) and the 5-hour reset (str)."""
         self.usage_session = session
         self.usage_week = week
+        self.session_reset = session_reset
         self._refresh_tooltip()
         self.update()
 
@@ -276,6 +284,7 @@ class StatusWindow(QtWidgets.QWidget):
                 f"Claude limit — session {pct(self.usage_session)} · "
                 f"week {pct(self.usage_week)}"
             )
+            lines.append(f"5-hour window resets at {self.session_reset or '…'}")
         if self.show_cost:
             lines.append(
                 f"Spend — today {self._fmt_cost(self.cost_today)} · "
@@ -319,8 +328,20 @@ class StatusWindow(QtWidgets.QWidget):
         p.drawEllipse(dx + m, dy + m, d - 2 * m, d - 2 * m)
 
         if self._has_panel:
+            if self.show_usage:
+                self._paint_header_time(p)
             self._paint_panel(p)
         p.end()
+
+    def _paint_header_time(self, p):
+        """The 5-hour session reset time, right-aligned in the header."""
+        font = QtGui.QFont()
+        font.setPixelSize(10)
+        p.setFont(font)
+        p.setPen(QtGui.QColor(FG))
+        rect = QtCore.QRect(self._PAD, self._PAD, self.USAGE_W - 2 * self._PAD, self.DOT_D)
+        p.drawText(rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
+                   self.session_reset or "…")
 
     def _paint_panel(self, p):
         font = QtGui.QFont()

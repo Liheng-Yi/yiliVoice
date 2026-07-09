@@ -732,9 +732,9 @@ class VoiceRecognitionApp:
         while not self.shutdown_event.is_set():
             if self.show_usage:
                 try:
-                    session, week = fetch_usage()
-                    if session is not None or week is not None:
-                        self.update_usage_safe(session, week)
+                    session, week, reset = fetch_usage()
+                    if session is not None or week is not None or reset is not None:
+                        self.update_usage_safe(session, week, reset)
                 except Exception as exc:
                     print(f"[Usage] limit poll error: {exc}")
             if self.show_cost:
@@ -799,9 +799,9 @@ class VoiceRecognitionApp:
                 if update_type == 'indicator':
                     update_indicator(self.canvas, self.indicator, args[0])
                 elif update_type == 'usage':
-                    session, week = args[0]
+                    session, week, reset = args[0]
                     if hasattr(self.window, 'set_usage'):
-                        self.window.set_usage(session, week)
+                        self.window.set_usage(session, week, reset)
                 elif update_type == 'cost':
                     today, month = args[0]
                     if hasattr(self.window, 'set_cost'):
@@ -847,9 +847,9 @@ class VoiceRecognitionApp:
         """Ask the usage monitor to re-poll now (bound to a usage-panel click)."""
         self.usage_refresh_event.set()
 
-    def update_usage_safe(self, session, week):
-        """Thread-safe push of the session/weekly limit percentages to the dot."""
-        self.ui_update_queue.put(('usage', (session, week)))
+    def update_usage_safe(self, session, week, session_reset=None):
+        """Thread-safe push of limit % + 5-hour reset time to the dot."""
+        self.ui_update_queue.put(('usage', (session, week, session_reset)))
 
     def update_cost_safe(self, today, month):
         """Thread-safe push of ccusage spend (USD) to the dot."""

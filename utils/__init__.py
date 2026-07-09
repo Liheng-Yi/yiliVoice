@@ -17,7 +17,7 @@ from .hotkeys import HotkeyManager, create_hotkey_manager
 from .sound import play_cue
 from .text_output import TextTyper, IncrementalTyper, stable_prefix
 from .usage import (
-    fetch_usage, parse_usage, claude_available,
+    fetch_usage, parse_usage, parse_session_reset, claude_available,
     fetch_ccusage, parse_ccusage, bunx_available,
 )
 
@@ -41,6 +41,7 @@ __all__ = [
     'stable_prefix',
     'fetch_usage',
     'parse_usage',
+    'parse_session_reset',
     'claude_available',
     'fetch_ccusage',
     'parse_ccusage',

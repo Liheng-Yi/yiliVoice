@@ -112,7 +112,6 @@ class StatusWindow(QtWidgets.QWidget):
     _PAD = 5
     _ROW_H = 15
     _ROWS_TOP = _PAD + DOT_D + 6    # y where the first meter row starts
-    _FOOTER_H = 13                  # bottom band holding the refresh countdown
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -175,8 +174,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")  # override app QSS bg
         if self._has_panel:
-            self._rows_bottom = self._ROWS_TOP + self._n_rows * self._ROW_H
-            height = self._rows_bottom + self._FOOTER_H + self._PAD
+            height = self._ROWS_TOP + self._n_rows * self._ROW_H + self._PAD
             self.setFixedSize(self.USAGE_W, height)
         else:
             self.setFixedSize(self.SIZE, self.SIZE)
@@ -193,13 +191,11 @@ class StatusWindow(QtWidgets.QWidget):
     def _dot_rect(self):
         """(x, y, diameter) of the status dot within the window.
 
-        When the limit half is shown the dot sits top-left, leaving the
-        top-right of the header for the session reset time; otherwise centered.
+        In panel mode the dot sits top-left, leaving the top-right of the
+        header for the reset time + refresh countdown (stacked).
         """
         if self._has_panel:
-            if self.show_usage:
-                return (self._PAD, self._PAD, self.DOT_D)
-            return ((self.USAGE_W - self.DOT_D) // 2, self._PAD, self.DOT_D)
+            return (self._PAD, self._PAD, self.DOT_D)
         return (0, 0, self.SIZE)
 
     def _row_specs(self):
@@ -359,31 +355,36 @@ class StatusWindow(QtWidgets.QWidget):
         p.drawEllipse(dx + m, dy + m, d - 2 * m, d - 2 * m)
 
         if self._has_panel:
-            if self.show_usage:
-                self._paint_header_time(p)
+            self._paint_header(p)
             self._paint_panel(p)
-            self._paint_footer(p)
         p.end()
 
-    def _paint_footer(self, p):
-        """Refresh countdown, dim and centered along the bottom band."""
+    def _paint_header(self, p):
+        """Right-aligned header stack next to the dot: reset time, then the
+        refresh countdown beneath it."""
+        w = self.USAGE_W - 2 * self._PAD
+        half = self.DOT_D // 2
         font = QtGui.QFont()
+
+        if self.show_usage:
+            # 5-hour reset time on the top line.
+            font.setPixelSize(10)
+            p.setFont(font)
+            p.setPen(QtGui.QColor(FG))
+            p.drawText(QtCore.QRect(self._PAD, self._PAD, w, half),
+                       QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight,
+                       self.session_reset or "…")
+            countdown_rect = QtCore.QRect(self._PAD, self._PAD + half, w, self.DOT_D - half)
+            countdown_align = QtCore.Qt.AlignTop | QtCore.Qt.AlignRight
+        else:
+            # No reset time (cost-only) — center the countdown in the header.
+            countdown_rect = QtCore.QRect(self._PAD, self._PAD, w, self.DOT_D)
+            countdown_align = QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight
+
         font.setPixelSize(9)
         p.setFont(font)
         p.setPen(QtGui.QColor(MUTED))
-        rect = QtCore.QRect(self._PAD, self._rows_bottom,
-                            self.USAGE_W - 2 * self._PAD, self._FOOTER_H)
-        p.drawText(rect, QtCore.Qt.AlignCenter, self._countdown_text())
-
-    def _paint_header_time(self, p):
-        """The 5-hour session reset time, right-aligned in the header."""
-        font = QtGui.QFont()
-        font.setPixelSize(10)
-        p.setFont(font)
-        p.setPen(QtGui.QColor(FG))
-        rect = QtCore.QRect(self._PAD, self._PAD, self.USAGE_W - 2 * self._PAD, self.DOT_D)
-        p.drawText(rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
-                   self.session_reset or "…")
+        p.drawText(countdown_rect, countdown_align, self._countdown_text())
 
     def _paint_panel(self, p):
         font = QtGui.QFont()

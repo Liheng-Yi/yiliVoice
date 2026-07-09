@@ -743,7 +743,9 @@ class VoiceRecognitionApp:
             for w in workers:
                 w.join(timeout=95)
             # Wait for the refresh interval, but wake early on a manual refresh.
-            self.usage_refresh_event.wait(timeout=max(30, self.config.usage_refresh))
+            interval = max(30, self.config.usage_refresh)
+            self.note_refresh_safe(interval)  # start the on-screen countdown
+            self.usage_refresh_event.wait(timeout=interval)
             self.usage_refresh_event.clear()
 
     def _poll_usage(self):
@@ -827,6 +829,9 @@ class VoiceRecognitionApp:
                     today, month = args[0]
                     if hasattr(self.window, 'set_cost'):
                         self.window.set_cost(today, month)
+                elif update_type == 'refreshed':
+                    if hasattr(self.window, 'note_refreshed'):
+                        self.window.note_refreshed(args[0])
         except Empty:
             pass  # No more updates to process
         except Exception as e:
@@ -871,6 +876,10 @@ class VoiceRecognitionApp:
     def update_usage_safe(self, session, week, session_reset=None):
         """Thread-safe push of limit % + 5-hour reset time to the dot."""
         self.ui_update_queue.put(('usage', (session, week, session_reset)))
+
+    def note_refresh_safe(self, interval):
+        """Thread-safe: (re)start the dot's refresh countdown."""
+        self.ui_update_queue.put(('refreshed', interval))
 
     def update_cost_safe(self, today, month):
         """Thread-safe push of ccusage spend (USD) to the dot."""

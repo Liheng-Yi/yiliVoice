@@ -18,6 +18,7 @@ Public API (kept compatible with the app):
 """
 
 import sys
+import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -111,6 +112,7 @@ class StatusWindow(QtWidgets.QWidget):
     _PAD = 5
     _ROW_H = 15
     _ROWS_TOP = _PAD + DOT_D + 6    # y where the first meter row starts
+    _FOOTER_H = 13                  # bottom band holding the refresh countdown
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -140,6 +142,11 @@ class StatusWindow(QtWidgets.QWidget):
         self.cost_month = None        # rolling last-30-days USD
         self._press_local = None     # widget-local press point (dot vs panel)
 
+        # Refresh countdown (footer). ``_refresh_deadline`` is a time.monotonic()
+        # value; ``note_refreshed`` sets it at the start of each poll's wait.
+        self._refresh_interval = None
+        self._refresh_deadline = None
+
         n_rows = (2 if show_usage else 0) + (2 if show_cost else 0)
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
@@ -168,12 +175,20 @@ class StatusWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")  # override app QSS bg
         if self._has_panel:
-            height = self._ROWS_TOP + self._n_rows * self._ROW_H + self._PAD
+            self._rows_bottom = self._ROWS_TOP + self._n_rows * self._ROW_H
+            height = self._rows_bottom + self._FOOTER_H + self._PAD
             self.setFixedSize(self.USAGE_W, height)
         else:
             self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(QtCore.Qt.OpenHandCursor)  # signal the dot is draggable
         self._refresh_tooltip()
+
+        # Tick the refresh countdown once a second (panel only).
+        if self._has_panel:
+            self._countdown_timer = QtCore.QTimer(self)
+            self._countdown_timer.setInterval(1000)
+            self._countdown_timer.timeout.connect(self.update)  # repaint footer
+            self._countdown_timer.start()
 
     def _dot_rect(self):
         """(x, y, diameter) of the status dot within the window.
@@ -260,6 +275,22 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_tooltip()
         self.update()
 
+    def note_refreshed(self, interval_seconds) -> None:
+        """Restart the refresh countdown; called at the start of each poll wait."""
+        self._refresh_interval = interval_seconds
+        self._refresh_deadline = time.monotonic() + interval_seconds
+        self.update()
+
+    def _countdown_text(self):
+        """"m:ss" until the next poll, or a refreshing marker while it runs."""
+        if self._refresh_deadline is None:
+            return "↻ --:--"
+        remaining = self._refresh_deadline - time.monotonic()
+        if remaining <= 0:
+            return "↻ …"  # ↻ …  (poll in flight)
+        m, s = divmod(int(remaining + 0.5), 60)
+        return f"↻ {m}:{s:02d}"
+
     @staticmethod
     def _fmt_cost(v):
         if v is None:
@@ -331,7 +362,18 @@ class StatusWindow(QtWidgets.QWidget):
             if self.show_usage:
                 self._paint_header_time(p)
             self._paint_panel(p)
+            self._paint_footer(p)
         p.end()
+
+    def _paint_footer(self, p):
+        """Refresh countdown, dim and centered along the bottom band."""
+        font = QtGui.QFont()
+        font.setPixelSize(9)
+        p.setFont(font)
+        p.setPen(QtGui.QColor(MUTED))
+        rect = QtCore.QRect(self._PAD, self._rows_bottom,
+                            self.USAGE_W - 2 * self._PAD, self._FOOTER_H)
+        p.drawText(rect, QtCore.Qt.AlignCenter, self._countdown_text())
 
     def _paint_header_time(self, p):
         """The 5-hour session reset time, right-aligned in the header."""

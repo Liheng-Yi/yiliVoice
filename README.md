@@ -120,8 +120,27 @@ Hotkeys differ per OS (and are listed in the System tab):
 > then a full restart of that terminal. Without it the hotkeys do nothing.
 
 The overlay appears at the top-center of the screen (just below the macOS
-menu bar). Indicator colors: **Amber = loading model**, Green = recording,
-Violet = ready, Red = idle/auto-shutdown.
+menu bar) on first run; **drag it anywhere** and it remembers the spot across
+launches (validated against your monitor layout, so unplugging a display can't
+strand it off-screen). Indicator colors: **Amber = loading model**, Green =
+recording, Violet = ready, Red = idle/auto-shutdown.
+
+### Usage meter
+
+A small panel below the dot shows how much Claude Code you're using. It has two
+halves, each shown only if its CLI is on your PATH:
+
+- **Limit** (needs `claude`): two progress bars — top = current session, bottom
+  = current week (all models). Bars go amber past 70%, red past 90%. Source:
+  `claude -p "/usage" --no-session-persistence`.
+- **Spend** (needs `bun`/`bunx`): **Today** and **30d** cost (USD-equivalent, to
+  the cent). Source: `bunx ccusage daily --json` — today is that day's row, 30d
+  is the sum of the trailing 30 days (a rolling window ending today, not the
+  calendar month).
+
+Both refresh every 5 minutes (`--usage_refresh <seconds>`); **click the meter to
+refresh now**. Disable it with `--no_usage`. If neither CLI is present the
+overlay is just the plain dot.
 
 ### Control Panel (click the overlay)
 

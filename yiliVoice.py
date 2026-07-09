@@ -23,6 +23,8 @@ from utils import (
     VoiceConverter, SOUNDDEVICE_AVAILABLE,
     create_backend, create_hotkey_manager, play_cue,
     TextTyper, IncrementalTyper,
+    fetch_usage, claude_available,
+    fetch_ccusage, bunx_available,
 )
 
 
@@ -74,6 +76,12 @@ class VoiceRecognitionApp:
         self.incremental_typer = IncrementalTyper(self.typer)
         self.use_streaming = False   # set once the backend is known
         self.stream = None           # active ParakeetStream during recording
+
+        # Meter below the dot: limit bars (needs `claude`) + ccusage spend
+        # (needs `bunx`). Each half decided in create_ui by CLI availability.
+        self.show_usage = False
+        self.show_cost = False
+        self.usage_refresh_event = threading.Event()  # set to poll now
 
         # Timing
         self.phrase_time = datetime.now(timezone.utc)
@@ -707,6 +715,39 @@ class VoiceRecognitionApp:
                 except Exception as init_error:
                     print(f"Failed to reinitialize audio: {init_error}")
     
+    def usage_monitor_thread(self):
+        """Poll the meter data and push it to the dot.
+
+        Two sources: `claude -p /usage` (session/weekly limit %) and
+        `bunx ccusage daily --json` (today/month spend). Both run off the UI
+        thread (network + subprocess, a few seconds each). Re-polls every
+        ``usage_refresh`` seconds, or immediately when the meter is clicked
+        (``usage_refresh_event``).
+        """
+        if not (self.show_usage or self.show_cost):
+            return
+        # Small initial delay so the first poll doesn't compete with model load.
+        if self.shutdown_event.wait(timeout=2.0):
+            return
+        while not self.shutdown_event.is_set():
+            if self.show_usage:
+                try:
+                    session, week = fetch_usage()
+                    if session is not None or week is not None:
+                        self.update_usage_safe(session, week)
+                except Exception as exc:
+                    print(f"[Usage] limit poll error: {exc}")
+            if self.show_cost:
+                try:
+                    today, month = fetch_ccusage()
+                    if today is not None or month is not None:
+                        self.update_cost_safe(today, month)
+                except Exception as exc:
+                    print(f"[Usage] cost poll error: {exc}")
+            # Wait for the refresh interval, but wake early on a manual refresh.
+            self.usage_refresh_event.wait(timeout=max(30, self.config.usage_refresh))
+            self.usage_refresh_event.clear()
+
     def inactivity_monitor_thread(self):
         """Monitor for inactivity and handle auto-shutdown"""
         while not self.shutdown_event.is_set():
@@ -757,6 +798,14 @@ class VoiceRecognitionApp:
                 update_type, *args = self.ui_update_queue.get_nowait()
                 if update_type == 'indicator':
                     update_indicator(self.canvas, self.indicator, args[0])
+                elif update_type == 'usage':
+                    session, week = args[0]
+                    if hasattr(self.window, 'set_usage'):
+                        self.window.set_usage(session, week)
+                elif update_type == 'cost':
+                    today, month = args[0]
+                    if hasattr(self.window, 'set_cost'):
+                        self.window.set_cost(today, month)
         except Empty:
             pass  # No more updates to process
         except Exception as e:
@@ -776,6 +825,7 @@ class VoiceRecognitionApp:
         event loop, after which run() falls through to cleanup().
         """
         self.shutdown_event.set()
+        self.usage_refresh_event.set()  # wake the usage poller out of its wait
 
     def _ui_tick(self):
         """Per-tick work run on the GUI thread (driven by the window's timer).
@@ -787,13 +837,40 @@ class VoiceRecognitionApp:
         if self.ready and self.hotkeys is None:
             self.setup_hotkeys()
 
+    def _on_window_moved(self, x, y):
+        """Persist the dot's new position (debounced by the window)."""
+        self.config.window_x = x
+        self.config.window_y = y
+        self.config.save_to_file()
+
+    def _request_usage_refresh(self):
+        """Ask the usage monitor to re-poll now (bound to a usage-panel click)."""
+        self.usage_refresh_event.set()
+
+    def update_usage_safe(self, session, week):
+        """Thread-safe push of the session/weekly limit percentages to the dot."""
+        self.ui_update_queue.put(('usage', (session, week)))
+
+    def update_cost_safe(self, today, month):
+        """Thread-safe push of ccusage spend (USD) to the dot."""
+        self.ui_update_queue.put(('cost', (today, month)))
+
     def create_ui(self):
         """Create the QApplication and the main status + log window."""
         hotkey_label = self.profile.hotkey_labels.get('toggle_recording', 'the hotkey')
+        # The meter needs CLIs on PATH; each half degrades away if its CLI is
+        # missing (or the whole meter is disabled).
+        self.show_usage = self.config.usage_enabled and claude_available()
+        self.show_cost = self.config.usage_enabled and bunx_available()
         self.qt_app, self.window, _ = create_overlay_window(
             debug_callback=self.toggle_debug_window,
             hotkey_label=hotkey_label,
             on_close=self._request_shutdown,
+            initial_pos=(self.config.window_x, self.config.window_y),
+            on_move=self._on_window_moved,
+            show_usage=self.show_usage,
+            show_cost=self.show_cost,
+            usage_click_callback=self._request_usage_refresh,
         )
         # Historical aliases used by the queue-driven update helpers.
         self.root = self.window
@@ -910,6 +987,7 @@ class VoiceRecognitionApp:
                 threading.Thread(target=self.audio_processor_thread, daemon=True),
                 threading.Thread(target=self.transcription_worker_thread, daemon=True),
                 threading.Thread(target=self.streaming_worker_thread, daemon=True),
+                threading.Thread(target=self.usage_monitor_thread, daemon=True),
                 threading.Thread(target=self.inactivity_monitor_thread, daemon=True)
             ]
             for thread in threads:
@@ -972,6 +1050,11 @@ def main():
     parser.add_argument("--stream_block", default=0.5, type=float,
                         help="Streaming backends (Parakeet): mic capture block in seconds. "
                              "Smaller feels snappier but costs more per-chunk overhead.")
+    parser.add_argument("--no_usage", action='store_true',
+                        help="Hide the Claude Code usage meter below the dot.")
+    parser.add_argument("--usage_refresh", default=300, type=int,
+                        help="Seconds between usage-meter polls (default 300 = 5 min); "
+                             "click the meter to refresh on demand.")
     
     args = parser.parse_args()
     config = VoiceConfig(args)

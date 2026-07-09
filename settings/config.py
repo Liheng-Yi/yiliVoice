@@ -90,11 +90,22 @@ class VoiceConfig:
         # Streaming backends (Parakeet) capture in small blocks so text can be
         # typed as you speak; smaller = snappier but more per-chunk overhead.
         self.stream_block = getattr(args, "stream_block", 0.5)
+        # Claude Code usage meter below the dot: how often to re-poll `claude
+        # -p /usage` (seconds). Each poll hits the network and takes a few
+        # seconds, so keep it coarse; click the bars to refresh on demand.
+        self.usage_enabled = not getattr(args, "no_usage", False)
+        self.usage_refresh = getattr(args, "usage_refresh", 300)
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
         # Default to the system's first input device (index 0); a persisted
         # selection overrides this.
         self.selected_microphone_index = saved.get("selected_microphone_index", 0)
+
+        # Floating-dot position (global/virtual-desktop coords, spanning all
+        # monitors). None until the user drags it; validated against the live
+        # screen layout on restore so an unplugged monitor can't strand it.
+        self.window_x = saved.get("window_x")
+        self.window_y = saved.get("window_y")
 
         # ------------------------------------------------------------------ #
         # Load external filter lists (filters.json)                           #
@@ -160,6 +171,8 @@ class VoiceConfig:
             'threshold_adjustment': self.threshold_adjustment,
             'inactivity_timeout': self.inactivity_timeout,
             'selected_microphone_index': self.selected_microphone_index,
+            'window_x': self.window_x,
+            'window_y': self.window_y,
             'timestamp': datetime.now().isoformat()
         }
 

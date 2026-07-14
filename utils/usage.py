@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import datetime
 import json
+import queue
 import re
 import shutil
 import subprocess
+import threading
+import time
 
 _SESSION_RE = re.compile(r"current session:\s*(\d+)\s*%", re.IGNORECASE)
 # Prefer the "(all models)" weekly line; fall back to the first weekly line.
@@ -167,3 +170,151 @@ def fetch_ccusage(timeout: float = 90.0):
     except Exception:
         return (None, None)
     return parse_ccusage(proc.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# Codex 7-day limit meter                                                      #
+# --------------------------------------------------------------------------- #
+#
+# Codex has no `usage` subcommand, but its app-server — the same backend the
+# interactive ``/status`` command reads — exposes the live plan rate limits
+# over JSON-RPC on stdio. We spawn it, `initialize`, and call
+# ``account/rateLimits/read``. This reuses the stored ChatGPT login, costs no
+# tokens (there is no model turn) and writes no session. The reply looks like::
+#
+#     {"rateLimitsByLimitId": {"codex": {"primary":
+#         {"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": ...},
+#      "secondary": null}}}
+#
+# On this plan Codex reports a single 7-day (10080-minute) window, so we pick
+# the widest window and surface its used-percent.
+
+
+def codex_available() -> bool:
+    return shutil.which("codex") is not None
+
+
+def _pick_weekly_window(snapshot):
+    """From a rate-limit snapshot, return the widest window dict (or None).
+
+    The app-server splits metered windows into ``primary``/``secondary``; the
+    7-day (10080-min) window is the widest, so picking by ``windowDurationMins``
+    yields the weekly limit no matter which slot it occupies.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    weekly = None
+    for w in (snapshot.get("primary"), snapshot.get("secondary")):
+        if not isinstance(w, dict):
+            continue
+        if weekly is None or (w.get("windowDurationMins") or 0) > (weekly.get("windowDurationMins") or 0):
+            weekly = w
+    return weekly
+
+
+def parse_codex_usage(response):
+    """Extract ``(week_pct, reset)`` from an ``account/rateLimits/read`` result.
+
+    Prefers the ``codex`` bucket of ``rateLimitsByLimitId`` and falls back to
+    the flat ``rateLimits`` snapshot. ``week_pct`` is the 7-day used-percent
+    (int 0-100) and ``reset`` a short local date like ``"Jul 19"``. Returns
+    ``(None, None)`` when no usable window is present.
+    """
+    if not isinstance(response, dict):
+        return (None, None)
+    by_id = response.get("rateLimitsByLimitId") or {}
+    snapshot = by_id.get("codex") or response.get("rateLimits")
+    window = _pick_weekly_window(snapshot)
+    if not window or window.get("usedPercent") is None:
+        return (None, None)
+    return (int(round(window["usedPercent"])), _fmt_codex_reset(window.get("resetsAt")))
+
+
+def _fmt_codex_reset(epoch):
+    """Format a unix ``resetsAt`` as a short local date, e.g. ``"Jul 19"``."""
+    try:
+        dt = datetime.datetime.fromtimestamp(float(epoch))
+    except Exception:
+        return None
+    return dt.strftime("%b %d").replace(" 0", " ")  # "Jul 07" -> "Jul 7"
+
+
+def fetch_codex_usage(timeout: float = 20.0):
+    """Return ``(week_pct, reset)`` for Codex's 7-day limit via the app-server.
+
+    Drives ``codex app-server`` over JSON-RPC (``initialize`` then
+    ``account/rateLimits/read``). The server is long-lived and never closes its
+    stdout, so we read line-by-line off a helper thread until the id=2 reply
+    arrives (or ``timeout``), then tear it down. Returns ``(None, None)`` if
+    ``codex`` is missing, not logged in, or the call errors/times out.
+    """
+    exe = shutil.which("codex")
+    if not exe:
+        return (None, None)
+
+    try:
+        proc = subprocess.Popen(
+            [exe, "app-server"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+    except Exception:
+        return (None, None)
+
+    lines = queue.Queue()
+
+    def _reader():
+        try:
+            for line in proc.stdout:
+                lines.put(line)
+        except Exception:
+            pass
+        finally:
+            lines.put(None)  # sentinel: stdout closed
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    try:
+        for msg in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"clientInfo": {"name": "yiliVoice", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "method": "initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}},
+        ):
+            proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return (None, None)
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                return (None, None)
+            if line is None:  # stdout closed before a reply
+                return (None, None)
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("id") == 2:
+                result = obj.get("result")
+                return parse_codex_usage(result) if isinstance(result, dict) else (None, None)
+    except Exception:
+        return (None, None)
+    finally:
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass

@@ -19,6 +19,7 @@ from .text_output import TextTyper, IncrementalTyper, stable_prefix
 from .usage import (
     fetch_usage, parse_usage, parse_session_reset, claude_available,
     fetch_ccusage, parse_ccusage, bunx_available,
+    fetch_codex_usage, parse_codex_usage, codex_available,
 )
 
 __all__ = [
@@ -46,4 +47,7 @@ __all__ = [
     'fetch_ccusage',
     'parse_ccusage',
     'bunx_available',
+    'fetch_codex_usage',
+    'parse_codex_usage',
+    'codex_available',
 ]

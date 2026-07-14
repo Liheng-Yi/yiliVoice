@@ -25,6 +25,7 @@ from utils import (
     TextTyper, IncrementalTyper,
     fetch_usage, claude_available,
     fetch_ccusage, bunx_available,
+    fetch_codex_usage, codex_available,
 )
 
 
@@ -77,10 +78,12 @@ class VoiceRecognitionApp:
         self.use_streaming = False   # set once the backend is known
         self.stream = None           # active ParakeetStream during recording
 
-        # Meter below the dot: limit bars (needs `claude`) + ccusage spend
-        # (needs `bunx`). Each half decided in create_ui by CLI availability.
+        # Meter below the dot: Claude limit bars (needs `claude`), the Codex
+        # 7-day bar (needs `codex`), and ccusage spend (needs `bunx`). Each
+        # part is decided in create_ui by CLI availability.
         self.show_usage = False
         self.show_cost = False
+        self.show_codex = False
         self.usage_refresh_event = threading.Event()  # set to poll now
 
         # Timing
@@ -724,18 +727,20 @@ class VoiceRecognitionApp:
         ``usage_refresh`` seconds, or immediately when the meter is clicked
         (``usage_refresh_event``).
         """
-        if not (self.show_usage or self.show_cost):
+        if not (self.show_usage or self.show_cost or self.show_codex):
             return
         # Small initial delay so the first poll doesn't compete with model load.
         if self.shutdown_event.wait(timeout=2.0):
             return
         while not self.shutdown_event.is_set():
-            # Fetch the two sources CONCURRENTLY so the reliable ccusage cost
+            # Fetch the sources CONCURRENTLY so the reliable ccusage cost
             # (~13s) is never gated behind the slower/flakier `claude -p /usage`
             # call — each updates the dot independently as soon as it returns.
             workers = []
             if self.show_usage:
                 workers.append(threading.Thread(target=self._poll_usage, daemon=True))
+            if self.show_codex:
+                workers.append(threading.Thread(target=self._poll_codex, daemon=True))
             if self.show_cost:
                 workers.append(threading.Thread(target=self._poll_cost, daemon=True))
             for w in workers:
@@ -759,6 +764,18 @@ class VoiceRecognitionApp:
                       "limit bars stay blank this cycle.")
         except Exception as exc:
             print(f"[Usage] limit poll error: {exc}")
+
+    def _poll_codex(self):
+        """Fetch the Codex 7-day limit % live from `codex app-server`."""
+        try:
+            week, reset = fetch_codex_usage()
+            if week is not None:
+                self.update_codex_safe(week, reset)
+            else:
+                print("[Usage] no Codex rate-limit data (is `codex` logged in?); "
+                      "the blue bar stays blank this cycle.")
+        except Exception as exc:
+            print(f"[Usage] codex poll error: {exc}")
 
     def _poll_cost(self):
         """Fetch today / last-30-day spend via `bunx ccusage daily --json`."""
@@ -825,6 +842,10 @@ class VoiceRecognitionApp:
                     session, week, reset = args[0]
                     if hasattr(self.window, 'set_usage'):
                         self.window.set_usage(session, week, reset)
+                elif update_type == 'codex':
+                    week, reset = args[0]
+                    if hasattr(self.window, 'set_codex_usage'):
+                        self.window.set_codex_usage(week, reset)
                 elif update_type == 'cost':
                     today, month = args[0]
                     if hasattr(self.window, 'set_cost'):
@@ -877,6 +898,10 @@ class VoiceRecognitionApp:
         """Thread-safe push of limit % + 5-hour reset time to the dot."""
         self.ui_update_queue.put(('usage', (session, week, session_reset)))
 
+    def update_codex_safe(self, week, week_reset=None):
+        """Thread-safe push of the Codex 7-day limit % to the dot."""
+        self.ui_update_queue.put(('codex', (week, week_reset)))
+
     def note_refresh_safe(self, interval):
         """Thread-safe: (re)start the dot's refresh countdown."""
         self.ui_update_queue.put(('refreshed', interval))
@@ -892,6 +917,7 @@ class VoiceRecognitionApp:
         # missing (or the whole meter is disabled).
         self.show_usage = self.config.usage_enabled and claude_available()
         self.show_cost = self.config.usage_enabled and bunx_available()
+        self.show_codex = self.config.usage_enabled and codex_available()
         self.qt_app, self.window, _ = create_overlay_window(
             debug_callback=self.toggle_debug_window,
             hotkey_label=hotkey_label,
@@ -900,6 +926,7 @@ class VoiceRecognitionApp:
             on_move=self._on_window_moved,
             show_usage=self.show_usage,
             show_cost=self.show_cost,
+            show_codex=self.show_codex,
             usage_click_callback=self._request_usage_refresh,
         )
         # Historical aliases used by the queue-driven update helpers.

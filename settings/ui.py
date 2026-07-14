@@ -118,9 +118,12 @@ class StatusWindow(QtWidgets.QWidget):
     _USAGE_OK = "#4ade80"
     _USAGE_WARN = "#fbbf24"
     _USAGE_ALARM = "#f87171"
+    # Codex's 7-day bar is always blue, marking it as the non-Claude limit.
+    _USAGE_CODEX = "#60a5fa"
 
     def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None,
-                 show_usage=False, show_cost=False, usage_click_callback=None):
+                 show_usage=False, show_cost=False, show_codex=False,
+                 usage_click_callback=None):
         super().__init__()
         self.hotkey_label = hotkey_label
         self._debug_callback = debug_callback
@@ -128,15 +131,19 @@ class StatusWindow(QtWidgets.QWidget):
         self._tick_cb = None
         self.state = "loading"
 
-        # Meter panel state. It shows up to two groups of rows:
-        #   * usage — session + weekly limit bars (no letters), from /usage
+        # Meter panel state. It shows up to three groups of rows:
+        #   * usage — Claude session + weekly limit bars (no letters), from /usage
+        #   * codex — Codex 7-day limit bar (always blue), from rollout logs
         #   * cost  — today + last-30-day spend (from ccusage)
         self.show_usage = show_usage
         self.show_cost = show_cost
+        self.show_codex = show_codex
         self._usage_click_cb = usage_click_callback
         self.usage_session = None    # int 0-100 or None (not fetched)
         self.usage_week = None
         self.session_reset = None    # 5-hour window reset time, e.g. "8:49pm"
+        self.usage_codex = None       # Codex 7-day limit %, int 0-100 or None
+        self.codex_reset = None       # Codex 7-day reset date, e.g. "Jul 17"
         self.cost_today = None        # float USD or None
         self.cost_month = None        # rolling last-30-days USD
         self._press_local = None     # widget-local press point (dot vs panel)
@@ -146,7 +153,8 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_interval = None
         self._refresh_deadline = None
 
-        n_rows = (2 if show_usage else 0) + (2 if show_cost else 0)
+        n_rows = ((2 if show_usage else 0) + (1 if show_codex else 0)
+                  + (2 if show_cost else 0))
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
 
@@ -201,13 +209,16 @@ class StatusWindow(QtWidgets.QWidget):
     def _row_specs(self):
         """Ordered meter rows.
 
-        ``("bar", pct)`` draws a label-less progress bar + percentage;
-        ``("text", label, value)`` draws a left label + right value.
+        ``("bar", pct, color)`` draws a label-less progress bar + percentage
+        (``color=None`` picks the level-based traffic-light fill); ``("text",
+        label, value)`` draws a left label + right value.
         """
         rows = []
         if self.show_usage:
-            rows.append(("bar", self.usage_session))
-            rows.append(("bar", self.usage_week))
+            rows.append(("bar", self.usage_session, None))
+            rows.append(("bar", self.usage_week, None))
+        if self.show_codex:
+            rows.append(("bar", self.usage_codex, self._USAGE_CODEX))
         if self.show_cost:
             rows.append(("text", "Today", self._fmt_cost(self.cost_today)))
             rows.append(("text", "30d", self._fmt_cost(self.cost_month)))
@@ -264,6 +275,13 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_tooltip()
         self.update()
 
+    def set_codex_usage(self, week, week_reset=None) -> None:
+        """Update Codex's 7-day limit % (int) and its reset date (str)."""
+        self.usage_codex = week
+        self.codex_reset = week_reset
+        self._refresh_tooltip()
+        self.update()
+
     def set_cost(self, today, month) -> None:
         """Update today / last-30-day spend in USD (floats or None)."""
         self.cost_today = today
@@ -304,14 +322,19 @@ class StatusWindow(QtWidgets.QWidget):
         if self.state in ("ready", "idle"):
             text = f"{text} — {self.hotkey_label}"
         lines = [f"yiliVoice — {text}"]
+
+        def pct(v):
+            return f"{v}%" if v is not None else "…"
+
         if self.show_usage:
-            def pct(v):
-                return f"{v}%" if v is not None else "…"
             lines.append(
                 f"Claude limit — session {pct(self.usage_session)} · "
                 f"week {pct(self.usage_week)}"
             )
             lines.append(f"5-hour window resets at {self.session_reset or '…'}")
+        if self.show_codex:
+            reset = f" · resets {self.codex_reset}" if self.codex_reset else ""
+            lines.append(f"Codex 7-day limit — {pct(self.usage_codex)}{reset}")
         if self.show_cost:
             lines.append(
                 f"Spend — today {self._fmt_cost(self.cost_today)} · "
@@ -393,12 +416,16 @@ class StatusWindow(QtWidgets.QWidget):
         for i, spec in enumerate(self._row_specs()):
             row_top = self._ROWS_TOP + i * self._ROW_H
             if spec[0] == "bar":
-                self._paint_bar_row(p, row_top, spec[1])
+                self._paint_bar_row(p, row_top, spec[1], spec[2])
             else:
                 self._paint_text_row(p, row_top, spec[1], spec[2])
 
-    def _paint_bar_row(self, p, row_top, pct):
-        """A label-less progress bar (session/weekly limit) + percentage."""
+    def _paint_bar_row(self, p, row_top, pct, color=None):
+        """A label-less progress bar + percentage.
+
+        ``color`` forces a fixed fill (Codex's blue); ``None`` picks the
+        level-based traffic-light colour (Claude's session/weekly bars).
+        """
         val_x = self.USAGE_W - self._PAD - 30
         bar_x = self._PAD + 1
         bar_w = val_x - bar_x - 6
@@ -411,7 +438,7 @@ class StatusWindow(QtWidgets.QWidget):
         if pct is not None:
             fill = int(bar_w * max(0, min(100, pct)) / 100)
             if fill > 0:
-                p.setBrush(self._usage_color(pct))
+                p.setBrush(QtGui.QColor(color) if color else self._usage_color(pct))
                 p.drawRoundedRect(bar_x, bar_y, fill, bar_h, 3, 3)
 
         p.setPen(QtGui.QColor(FG))
@@ -576,15 +603,16 @@ def _resolve_start_pos(saved_x, saved_y, w, h):
 
 def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
                           on_close=None, initial_pos=None, on_move=None,
-                          show_usage=False, show_cost=False, usage_click_callback=None):
+                          show_usage=False, show_cost=False, show_codex=False,
+                          usage_click_callback=None):
     """Create the QApplication (if needed) and the floating status dot.
 
     ``initial_pos`` is a saved ``(x, y)`` (or ``None``); it is validated
     against the current monitor layout before use.  ``on_move(x, y)`` is
     called (debounced) whenever the user drags the dot, to persist its spot.
-    ``show_usage`` adds the Claude limit bars below the dot and ``show_cost``
-    the ccusage spend rows; ``usage_click_callback`` is invoked when the user
-    clicks the meter.
+    ``show_usage`` adds the Claude limit bars below the dot, ``show_codex`` the
+    blue Codex 7-day limit bar, and ``show_cost`` the ccusage spend rows;
+    ``usage_click_callback`` is invoked when the user clicks the meter.
 
     Returns ``(qt_app, window, window)``.
     """
@@ -596,6 +624,7 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
         on_close=on_close,
         show_usage=show_usage,
         show_cost=show_cost,
+        show_codex=show_codex,
         usage_click_callback=usage_click_callback,
     )
     saved_x, saved_y = (initial_pos or (None, None))

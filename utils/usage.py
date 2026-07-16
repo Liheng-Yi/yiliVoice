@@ -111,24 +111,25 @@ def fetch_usage(timeout: float = 30.0):
 # --------------------------------------------------------------------------- #
 #
 # `bunx ccusage daily --json` reports per-day rows with a `period` (YYYY-MM-DD)
-# and a `totalCost`. Today's cost is the row whose period is today; the window
-# cost is the sum of the rows in the trailing 30 days (ending today,
-# inclusive) — a rolling window, NOT the calendar month.
+# and a `totalCost`. Today's cost is the row whose period is today; the month
+# cost is the sum of the rows in the current calendar month so far (from the
+# 1st through today, inclusive) — month-to-date, NOT a rolling 30-day window.
 
 
-def parse_ccusage(json_text: str, today=None, window_days: int = 30):
-    """Extract ``(today_cost, window_cost)`` (floats, USD) from daily JSON.
+def parse_ccusage(json_text: str, today=None):
+    """Extract ``(today_cost, month_cost)`` (floats, USD) from daily JSON.
 
-    ``window_cost`` sums the last ``window_days`` days ending today (inclusive).
-    ``today`` overrides the current date (``date`` or ISO string, for tests).
-    Returns ``(None, None)`` if the JSON can't be parsed; a valid payload with
-    no row for today yields ``0.0`` (you simply haven't spent anything today).
+    ``month_cost`` sums the current calendar month so far (from the 1st through
+    today, inclusive). ``today`` overrides the current date (``date`` or ISO
+    string, for tests). Returns ``(None, None)`` if the JSON can't be parsed; a
+    valid payload with no row for today yields ``0.0`` (you simply haven't spent
+    anything today).
     """
     if today is None:
         today = datetime.date.today()
     elif isinstance(today, str):
         today = datetime.date.fromisoformat(today)
-    start = today - datetime.timedelta(days=window_days - 1)
+    start = today.replace(day=1)  # first of the current month
     today_str = today.isoformat()
 
     try:
@@ -136,7 +137,7 @@ def parse_ccusage(json_text: str, today=None, window_days: int = 30):
     except Exception:
         return (None, None)
 
-    def in_window(period) -> bool:
+    def in_month(period) -> bool:
         try:
             d = datetime.date.fromisoformat(str(period)[:10])
         except Exception:
@@ -144,8 +145,8 @@ def parse_ccusage(json_text: str, today=None, window_days: int = 30):
         return start <= d <= today
 
     today_cost = sum(r.get("totalCost", 0.0) for r in rows if r.get("period") == today_str)
-    window_cost = sum(r.get("totalCost", 0.0) for r in rows if in_window(r.get("period")))
-    return (float(today_cost), float(window_cost))
+    month_cost = sum(r.get("totalCost", 0.0) for r in rows if in_month(r.get("period")))
+    return (float(today_cost), float(month_cost))
 
 
 def bunx_available() -> bool:

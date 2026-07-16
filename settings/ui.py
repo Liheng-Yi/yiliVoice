@@ -101,7 +101,7 @@ class StatusWindow(QtWidgets.QWidget):
     """A single always-on-top, draggable status dot.
 
     With a meter enabled, the window grows a small translucent panel below the
-    dot showing the Claude limit bars and/or today + last-30-day spend.
+    dot showing the Claude limit bars and/or today + this-month spend.
     """
 
     SIZE = 30  # dot-only window is SIZE×SIZE; the dot is inset a few px
@@ -134,7 +134,7 @@ class StatusWindow(QtWidgets.QWidget):
         # Meter panel state. It shows up to three groups of rows:
         #   * usage — Claude session + weekly limit bars (no letters), from /usage
         #   * codex — Codex 7-day limit bar (always blue), from rollout logs
-        #   * cost  — today + last-30-day spend (from ccusage)
+        #   * cost  — today + this-month spend (from ccusage)
         self.show_usage = show_usage
         self.show_cost = show_cost
         self.show_codex = show_codex
@@ -145,7 +145,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.usage_codex = None       # Codex 7-day limit %, int 0-100 or None
         self.codex_reset = None       # Codex 7-day reset date, e.g. "Jul 17"
         self.cost_today = None        # float USD or None
-        self.cost_month = None        # rolling last-30-days USD
+        self.cost_month = None        # this month so far (month-to-date) USD
         self._press_local = None     # widget-local press point (dot vs panel)
 
         # Refresh countdown (footer). ``_refresh_deadline`` is a time.monotonic()
@@ -221,7 +221,7 @@ class StatusWindow(QtWidgets.QWidget):
             rows.append(("bar", self.usage_codex, self._USAGE_CODEX))
         if self.show_cost:
             rows.append(("text", "Today", self._fmt_cost(self.cost_today)))
-            rows.append(("text", "30d", self._fmt_cost(self.cost_month)))
+            rows.append(("text", "Month", self._fmt_cost(self.cost_month)))
         return rows
 
     # -- public API used by the app ------------------------------------- #
@@ -283,7 +283,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.update()
 
     def set_cost(self, today, month) -> None:
-        """Update today / last-30-day spend in USD (floats or None)."""
+        """Update today / this-month spend in USD (floats or None)."""
         self.cost_today = today
         self.cost_month = month
         self._refresh_tooltip()
@@ -338,7 +338,7 @@ class StatusWindow(QtWidgets.QWidget):
         if self.show_cost:
             lines.append(
                 f"Spend — today {self._fmt_cost(self.cost_today)} · "
-                f"last 30 days {self._fmt_cost(self.cost_month)}"
+                f"this month {self._fmt_cost(self.cost_month)}"
             )
         if self._has_panel:
             lines.append("click dot: settings · click meter: refresh · right-click: menu")

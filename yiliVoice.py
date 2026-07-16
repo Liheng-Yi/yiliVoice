@@ -778,7 +778,7 @@ class VoiceRecognitionApp:
             print(f"[Usage] codex poll error: {exc}")
 
     def _poll_cost(self):
-        """Fetch today / last-30-day spend via `bunx ccusage daily --json`."""
+        """Fetch today / this-month spend via `bunx ccusage daily --json`."""
         try:
             today, month = fetch_ccusage()
             if today is not None or month is not None:

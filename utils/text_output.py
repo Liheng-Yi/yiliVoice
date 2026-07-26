@@ -19,6 +19,8 @@ safe to call from any worker thread.
 
 from __future__ import annotations
 
+import time
+
 from .hotkeys import prewarm_macos_key_layout
 
 
@@ -27,15 +29,17 @@ class TextTyper:
 
     def __init__(self):
         self.backend_name = "none"
+        self._release_modifiers = lambda: None  # set per-backend below
         self._type = self._make_backend()
 
     def _make_backend(self):
         try:
-            from pynput.keyboard import Controller
+            from pynput.keyboard import Controller, Key
 
             prewarm_macos_key_layout()  # main-thread TIS cache; no-op off macOS
             controller = Controller()
             self.backend_name = "pynput"
+            self._release_modifiers = self._pynput_modifier_releaser(controller, Key)
             return controller.type
         except Exception:
             pass
@@ -44,6 +48,7 @@ class TextTyper:
             import keyboard
 
             self.backend_name = "keyboard"
+            self._release_modifiers = lambda: self._keyboard_release_modifiers(keyboard)
             return keyboard.write
         except Exception:
             pass
@@ -53,9 +58,62 @@ class TextTyper:
         self.backend_name = "pyautogui"
         return lambda text: pyautogui.write(text, interval=0)
 
+    @staticmethod
+    def _pynput_modifier_releaser(controller, Key):
+        """Return a fn that posts key-up for every modifier (both L/R sides).
+
+        Releasing a key the controller never pressed just posts an up event —
+        harmless if it wasn't down, and it clears the flag if it was.
+        """
+        mods = [
+            Key.ctrl, Key.ctrl_l, Key.ctrl_r,
+            Key.cmd, Key.cmd_l, Key.cmd_r,
+            Key.alt, Key.alt_l, Key.alt_r,
+            Key.shift, Key.shift_l, Key.shift_r,
+        ]
+
+        def release():
+            for m in mods:
+                try:
+                    controller.release(m)
+                except Exception:
+                    pass
+
+        return release
+
+    @staticmethod
+    def _keyboard_release_modifiers(keyboard):
+        for name in ("ctrl", "alt", "shift", "windows", "cmd"):
+            try:
+                keyboard.release(name)
+            except Exception:
+                pass
+
     def type(self, text: str) -> None:
         if text:
             self._type(text)
+
+    def type_isolated(self, text: str, pre_delay: float = 0.3) -> None:
+        """Type *text* after releasing any modifier keys still held down.
+
+        For hotkey-triggered macros: when the hotkey fires, the user is usually
+        still holding the trigger combo (e.g. Cmd+Ctrl+1). Typing right then
+        would emit each character as a modifier chord — Cmd+V, Ctrl+R, Ctrl+W —
+        clobbering the focused app. We release the common modifiers and pause
+        briefly so the physical keys are up, then type normally.
+
+        Call from a worker thread: the pause would otherwise block the caller
+        (a hotkey listener thread).
+        """
+        if not text:
+            return
+        try:
+            self._release_modifiers()
+        except Exception:
+            pass
+        if pre_delay:
+            time.sleep(pre_delay)
+        self._type(text)
 
 
 def stable_prefix(text: str, holdback_words: int) -> str:

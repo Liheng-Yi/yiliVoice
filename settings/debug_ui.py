@@ -487,10 +487,17 @@ class DebugUI:
             "",
             f"Hotkey Backend      {hk_name}",
         ]
-        for action in ("toggle_recording", "toggle_voice_changer", "toggle_vc_routing"):
-            label = action.replace("toggle_", "").replace("_", " ").title()
+        _ACTION_LABELS = {
+            "toggle_recording": "Recording",
+            "toggle_voice_changer": "Voice Changer",
+            "toggle_vc_routing": "Vc Routing",
+            "type_review_fix_push": "Type /review-fix-push",
+        }
+        for action in ("toggle_recording", "toggle_voice_changer",
+                       "toggle_vc_routing", "type_review_fix_push"):
+            label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
             combo = p.hotkey_labels.get(action, "—")
-            lines.append(f"  {label:<18}{combo}")
+            lines.append(f"  {label:<22}{combo}")
         if p.permission_note:
             lines += ["", "Permissions", f"  {p.permission_note}"]
 

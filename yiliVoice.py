@@ -584,7 +584,33 @@ class VoiceRecognitionApp:
             print("[VoiceConverter] Not available")
             return
         is_speaker = self.voice_converter.toggle_routing()
-        
+
+    def type_review_fix_push(self):
+        """Hotkey macro: type "/review-fix-push" into the focused app.
+
+        No trailing space or Enter — it leaves the slash command sitting in the
+        prompt so you can review it and submit it yourself.
+        """
+        self._type_macro("/review-fix-push")
+
+    def _type_macro(self, text):
+        """Type a fixed string into whatever window has focus.
+
+        Runs off the hotkey listener thread: the macro fires while its trigger
+        modifiers are still held, so ``TextTyper.type_isolated`` releases them
+        and waits a beat before typing (see its docstring). That wait must not
+        block the listener, hence the daemon thread.
+        """
+        print(f"[Hotkeys] typing macro: {text!r}")
+
+        def worker():
+            try:
+                self.typer.type_isolated(text)
+            except Exception as exc:
+                print(f"[Hotkeys] macro type error: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def setup_hotkeys(self):
         """Register global hotkeys via the platform-appropriate backend.
 
@@ -597,6 +623,7 @@ class VoiceRecognitionApp:
         self.hotkeys.register('toggle_recording', self.toggle_recording)
         self.hotkeys.register('toggle_voice_changer', self.toggle_voice_converter)
         self.hotkeys.register('toggle_vc_routing', self.toggle_voice_converter_routing)
+        self.hotkeys.register('type_review_fix_push', self.type_review_fix_push)
         self.hotkeys.start()
         self._check_hotkey_permissions()
 
@@ -1020,6 +1047,7 @@ class VoiceRecognitionApp:
             print(f"  {labels.get('toggle_recording', '?'):<22} Toggle speech-to-text recording")
             print(f"  {labels.get('toggle_voice_changer', '?'):<22} Toggle voice changer (sharp/funny)")
             print(f"  {labels.get('toggle_vc_routing', '?'):<22} Toggle voice changer output (cable / speaker)")
+            print(f"  {labels.get('type_review_fix_push', '?'):<22} Type /review-fix-push")
         except Exception as exc:
             print(f"Initialization failed: {exc}")
             self.update_indicator_safe(idle=True)

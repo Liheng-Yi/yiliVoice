@@ -28,6 +28,24 @@ from utils import (
     fetch_codex_usage, codex_available,
 )
 
+# macOS: used to hand focus back to the app you were working in before a
+# Commands-menu click focused yiliVoice (typing goes to the frontmost app).
+try:
+    from AppKit import NSWorkspace, NSApplicationActivateIgnoringOtherApps
+except Exception:
+    NSWorkspace = None
+    NSApplicationActivateIgnoringOtherApps = 0
+
+
+# Typed-command macros, the single source of truth for the dot's
+# "Commands ▾" menu. Each entry is (text typed into the focused app,
+# hotkey action name or None). To add a command later: append a row here —
+# it shows up in the menu automatically; to also give it a hotkey, add the
+# action under the same name to settings/platform_profile.py's _OS_TABLE.
+TYPED_MACROS = [
+    ("/review-fix-push", "type_review_fix_push"),
+]
+
 
 def _force_quit(signum, frame):
     """Hard-exit on Ctrl+C / SIGTERM.
@@ -85,6 +103,10 @@ class VoiceRecognitionApp:
         self.show_cost = False
         self.show_codex = False
         self.usage_refresh_event = threading.Event()  # set to poll now
+
+        # Commands-menu focus handback (see _remember_front_app).
+        self._front_app = None
+        self._tick_n = 0
 
         # Timing
         self.phrase_time = datetime.now(timezone.utc)
@@ -585,13 +607,48 @@ class VoiceRecognitionApp:
             return
         is_speaker = self.voice_converter.toggle_routing()
 
-    def type_review_fix_push(self):
-        """Hotkey macro: type "/review-fix-push" into the focused app.
+    def _remember_front_app(self):
+        """Track the frontmost *external* app (macOS, sampled ~1/s).
 
-        No trailing space or Enter — it leaves the slash command sitting in the
-        prompt so you can review it and submit it yourself.
+        Clicking the dot's Commands menu focuses yiliVoice, so the synthetic
+        keystrokes would go nowhere. We keep the last non-yiliVoice frontmost
+        app and hand focus back to it before typing a menu-picked macro.
         """
-        self._type_macro("/review-fix-push")
+        if NSWorkspace is None:
+            return
+        try:
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is not None and app.processIdentifier() != os.getpid():
+                self._front_app = app
+        except Exception:
+            pass
+
+    def type_macro_from_menu(self, text):
+        """Commands-menu macro: refocus the previous app, then type *text*.
+
+        No trailing space or Enter — the command is left sitting in the
+        target app's prompt so you can review and submit it yourself.
+        """
+        front = self._front_app
+        try:
+            target = f" into {front.localizedName()}" if front is not None else ""
+        except Exception:
+            target = ""
+        print(f"[Hotkeys] typing macro{target}: {text!r}")
+
+        def worker():
+            try:
+                if front is not None:
+                    try:
+                        front.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                    except Exception:
+                        pass
+                    time.sleep(0.35)  # let the app take focus back
+                self.typer.type_isolated(text, pre_delay=0.15)
+            except Exception as exc:
+                print(f"[Hotkeys] macro type error: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _type_macro(self, text):
         """Type a fixed string into whatever window has focus.
@@ -623,7 +680,9 @@ class VoiceRecognitionApp:
         self.hotkeys.register('toggle_recording', self.toggle_recording)
         self.hotkeys.register('toggle_voice_changer', self.toggle_voice_converter)
         self.hotkeys.register('toggle_vc_routing', self.toggle_voice_converter_routing)
-        self.hotkeys.register('type_review_fix_push', self.type_review_fix_push)
+        for text, action in TYPED_MACROS:
+            if action:
+                self.hotkeys.register(action, lambda t=text: self._type_macro(t))
         self.hotkeys.start()
         self._check_hotkey_permissions()
 
@@ -908,6 +967,9 @@ class VoiceRecognitionApp:
         model is ready (kept on the main thread, matching the previous design).
         """
         self.process_ui_updates()
+        self._tick_n += 1
+        if self._tick_n % 25 == 0:  # ~1 s at the 40 ms pump rate
+            self._remember_front_app()
         if self.ready and self.hotkeys is None:
             self.setup_hotkeys()
 
@@ -945,6 +1007,11 @@ class VoiceRecognitionApp:
         self.show_usage = self.config.usage_enabled and claude_available()
         self.show_cost = self.config.usage_enabled and bunx_available()
         self.show_codex = self.config.usage_enabled and codex_available()
+        # Commands ▾ menu entries: (typed text, hotkey label to show, if any).
+        macros = [
+            (text, self.profile.hotkey_labels.get(action, "") if action else "")
+            for text, action in TYPED_MACROS
+        ]
         self.qt_app, self.window, _ = create_overlay_window(
             debug_callback=self.toggle_debug_window,
             hotkey_label=hotkey_label,
@@ -955,6 +1022,8 @@ class VoiceRecognitionApp:
             show_cost=self.show_cost,
             show_codex=self.show_codex,
             usage_click_callback=self._request_usage_refresh,
+            macros=macros,
+            macro_callback=self.type_macro_from_menu,
         )
         # Historical aliases used by the queue-driven update helpers.
         self.root = self.window
@@ -1047,7 +1116,9 @@ class VoiceRecognitionApp:
             print(f"  {labels.get('toggle_recording', '?'):<22} Toggle speech-to-text recording")
             print(f"  {labels.get('toggle_voice_changer', '?'):<22} Toggle voice changer (sharp/funny)")
             print(f"  {labels.get('toggle_vc_routing', '?'):<22} Toggle voice changer output (cable / speaker)")
-            print(f"  {labels.get('type_review_fix_push', '?'):<22} Type /review-fix-push")
+            for text, action in TYPED_MACROS:
+                combo = labels.get(action, "Commands ▾ menu") if action else "Commands ▾ menu"
+                print(f"  {combo:<22} Type {text}")
         except Exception as exc:
             print(f"Initialization failed: {exc}")
             self.update_indicator_safe(idle=True)

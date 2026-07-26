@@ -112,6 +112,7 @@ class StatusWindow(QtWidgets.QWidget):
     _PAD = 5
     _ROW_H = 15
     _ROWS_TOP = _PAD + DOT_D + 6    # y where the first meter row starts
+    _CMD_H = 17                     # "Commands ▾" footer row height
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -123,7 +124,7 @@ class StatusWindow(QtWidgets.QWidget):
 
     def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None,
                  show_usage=False, show_cost=False, show_codex=False,
-                 usage_click_callback=None):
+                 usage_click_callback=None, macros=None, macro_callback=None):
         super().__init__()
         self.hotkey_label = hotkey_label
         self._debug_callback = debug_callback
@@ -139,6 +140,10 @@ class StatusWindow(QtWidgets.QWidget):
         self.show_cost = show_cost
         self.show_codex = show_codex
         self._usage_click_cb = usage_click_callback
+        # Typed-command macros: [(text, hotkey hint), ...]. Shown in the
+        # "Commands ▾" footer row (panel mode) and the right-click menu.
+        self.macros = list(macros or [])
+        self._macro_cb = macro_callback
         self.usage_session = None    # int 0-100 or None (not fetched)
         self.usage_week = None
         self.session_reset = None    # 5-hour window reset time, e.g. "8:49pm"
@@ -157,6 +162,7 @@ class StatusWindow(QtWidgets.QWidget):
                   + (2 if show_cost else 0))
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
+        self._has_cmd_row = self._has_panel and bool(self.macros)
 
         self._drag_offset = None
         self._press_pos = None
@@ -183,6 +189,8 @@ class StatusWindow(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")  # override app QSS bg
         if self._has_panel:
             height = self._ROWS_TOP + self._n_rows * self._ROW_H + self._PAD
+            if self._has_cmd_row:
+                height += self._CMD_H
             self.setFixedSize(self.USAGE_W, height)
         else:
             self.setFixedSize(self.SIZE, self.SIZE)
@@ -341,7 +349,11 @@ class StatusWindow(QtWidgets.QWidget):
                 f"this month {self._fmt_cost(self.cost_month)}"
             )
         if self._has_panel:
-            lines.append("click dot: settings · click meter: refresh · right-click: menu")
+            hint = "click dot: settings · click meter: refresh · right-click: menu"
+            if self._has_cmd_row:
+                hint = ("click dot: settings · Commands ▾: type a command · "
+                        "click meter: refresh · right-click: menu")
+            lines.append(hint)
         else:
             lines.append("click: settings   ·   right-click: menu")
         self.setToolTip("\n".join(lines))
@@ -380,6 +392,8 @@ class StatusWindow(QtWidgets.QWidget):
         if self._has_panel:
             self._paint_header(p)
             self._paint_panel(p)
+            if self._has_cmd_row:
+                self._paint_cmd_row(p)
         p.end()
 
     def _paint_header(self, p):
@@ -446,6 +460,23 @@ class StatusWindow(QtWidgets.QWidget):
         p.drawText(QtCore.QRect(val_x, row_top, 30, self._ROW_H),
                    QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, text)
 
+    def _cmd_row_top(self):
+        """y where the "Commands ▾" footer row starts."""
+        return self._ROWS_TOP + self._n_rows * self._ROW_H
+
+    def _paint_cmd_row(self, p):
+        """Dropdown-style footer button that opens the typed-commands menu."""
+        r = QtCore.QRect(self._PAD, self._cmd_row_top() + 2,
+                         self.USAGE_W - 2 * self._PAD, self._CMD_H - 4)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(55, 65, 81, 130))  # #374151, translucent
+        p.drawRoundedRect(r, 5, 5)
+        font = QtGui.QFont()
+        font.setPixelSize(9)
+        p.setFont(font)
+        p.setPen(QtGui.QColor(FG))
+        p.drawText(r, QtCore.Qt.AlignCenter, "Commands ▾")
+
     def _paint_text_row(self, p, row_top, label, value):
         p.setPen(QtGui.QColor(MUTED))
         p.drawText(QtCore.QRect(self._PAD + 1, row_top, 40, self._ROW_H),
@@ -509,24 +540,53 @@ class StatusWindow(QtWidgets.QWidget):
             self._system_move = False
             self.setCursor(QtCore.Qt.OpenHandCursor)
             if was_click:
-                # Clicking the dot opens Settings; clicking anywhere else on
-                # the meter (header reset, bars, spend) refreshes it.
+                # Clicking the dot opens Settings; the "Commands ▾" footer
+                # opens the typed-commands menu; anywhere else on the meter
+                # (header reset, bars, spend) refreshes it.
                 dx, dy, d = self._dot_rect()
                 on_dot = local is not None and QtCore.QRect(dx, dy, d, d).contains(local)
-                if self._has_panel and not on_dot and self._usage_click_cb:
+                on_cmds = (self._has_cmd_row and local is not None
+                           and local.y() >= self._cmd_row_top())
+                if on_cmds:
+                    self._show_macro_menu()
+                elif self._has_panel and not on_dot and self._usage_click_cb:
                     self._usage_click_cb()
                 elif self._debug_callback:
                     self._debug_callback()
             e.accept()
 
+    def _macro_menu_entries(self, menu):
+        """Fill *menu* with one action per macro; returns {action: text}."""
+        entries = {}
+        for text, hint in self.macros:
+            # "\t" puts the hotkey hint in the menu's shortcut column.
+            act = menu.addAction(f"{text}\t{hint}" if hint else text)
+            entries[act] = text
+        return entries
+
+    def _show_macro_menu(self):
+        """Pop the typed-commands menu (from the "Commands ▾" footer)."""
+        if not self.macros:
+            return
+        menu = QtWidgets.QMenu(self)
+        entries = self._macro_menu_entries(menu)
+        chosen = menu.exec(QtGui.QCursor.pos())
+        if chosen in entries and self._macro_cb:
+            self._macro_cb(entries[chosen])
+
     def contextMenuEvent(self, e):
         menu = QtWidgets.QMenu(self)
         act_settings = menu.addAction("Settings")
+        entries = {}
+        if self.macros:
+            entries = self._macro_menu_entries(menu.addMenu("Type Command"))
         menu.addSeparator()
         act_quit = menu.addAction("Quit yiliVoice")
         chosen = menu.exec(e.globalPos())
         if chosen == act_settings and self._debug_callback:
             self._debug_callback()
+        elif chosen in entries and self._macro_cb:
+            self._macro_cb(entries[chosen])
         elif chosen == act_quit:
             self._quit()
 
@@ -604,7 +664,8 @@ def _resolve_start_pos(saved_x, saved_y, w, h):
 def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
                           on_close=None, initial_pos=None, on_move=None,
                           show_usage=False, show_cost=False, show_codex=False,
-                          usage_click_callback=None):
+                          usage_click_callback=None, macros=None,
+                          macro_callback=None):
     """Create the QApplication (if needed) and the floating status dot.
 
     ``initial_pos`` is a saved ``(x, y)`` (or ``None``); it is validated
@@ -613,6 +674,8 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
     ``show_usage`` adds the Claude limit bars below the dot, ``show_codex`` the
     blue Codex 7-day limit bar, and ``show_cost`` the ccusage spend rows;
     ``usage_click_callback`` is invoked when the user clicks the meter.
+    ``macros`` is ``[(text, hotkey_hint), ...]`` for the "Commands ▾" footer
+    (also in the right-click menu); picking one calls ``macro_callback(text)``.
 
     Returns ``(qt_app, window, window)``.
     """
@@ -626,6 +689,8 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
         show_cost=show_cost,
         show_codex=show_codex,
         usage_click_callback=usage_click_callback,
+        macros=macros,
+        macro_callback=macro_callback,
     )
     saved_x, saved_y = (initial_pos or (None, None))
     start_x, start_y = _resolve_start_pos(

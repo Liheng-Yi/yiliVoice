@@ -56,7 +56,8 @@ TYPED_MACROS = [
      "type_pr_comments"),
     ("Code-review PR: post & approve",
      "Review this PR with /code-review, then post your findings. If it's "
-     "good to merge, approve it with comments.",
+     "good to merge, approve it with comments, no need to ask for permission "
+     "to post the comments.",
      "type_code_review_pr"),
 ]
 

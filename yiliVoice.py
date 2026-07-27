@@ -38,12 +38,22 @@ except Exception:
 
 
 # Typed-command macros, the single source of truth for the dot's
-# "Commands ▾" menu. Each entry is (text typed into the focused app,
-# hotkey action name or None). To add a command later: append a row here —
-# it shows up in the menu automatically; to also give it a hotkey, add the
-# action under the same name to settings/platform_profile.py's _OS_TABLE.
+# "Commands ▾" menu. Each entry is (menu label, text typed into the focused
+# app, hotkey action name or None). The text must stay single-line — a
+# newline would submit the prompt in most chat inputs. To add a command
+# later: append a row here — it shows up in the menu automatically; to also
+# give it a hotkey, add the action under the same name to
+# settings/platform_profile.py's _OS_TABLE.
 TYPED_MACROS = [
-    ("/review-fix-push", "type_review_fix_push"),
+    ("/review-fix-push",
+     "/review-fix-push",
+     "type_review_fix_push"),
+    ("PR comments: fix, push & reply",
+     "There are some comments under this PR. Review them; for each blocker "
+     "or issue that is valid, fix it. Push the fixes (if a password is "
+     "needed, stop and ask me). After the push, reply to each comment, and "
+     "if a reviewer requested changes, re-request their review.",
+     "type_pr_comments"),
 ]
 
 
@@ -680,7 +690,7 @@ class VoiceRecognitionApp:
         self.hotkeys.register('toggle_recording', self.toggle_recording)
         self.hotkeys.register('toggle_voice_changer', self.toggle_voice_converter)
         self.hotkeys.register('toggle_vc_routing', self.toggle_voice_converter_routing)
-        for text, action in TYPED_MACROS:
+        for _label, text, action in TYPED_MACROS:
             if action:
                 self.hotkeys.register(action, lambda t=text: self._type_macro(t))
         self.hotkeys.start()
@@ -1007,10 +1017,11 @@ class VoiceRecognitionApp:
         self.show_usage = self.config.usage_enabled and claude_available()
         self.show_cost = self.config.usage_enabled and bunx_available()
         self.show_codex = self.config.usage_enabled and codex_available()
-        # Commands ▾ menu entries: (typed text, hotkey label to show, if any).
+        # Commands ▾ menu entries: (label, typed text, hotkey hint if any).
         macros = [
-            (text, self.profile.hotkey_labels.get(action, "") if action else "")
-            for text, action in TYPED_MACROS
+            (label, text,
+             self.profile.hotkey_labels.get(action, "") if action else "")
+            for label, text, action in TYPED_MACROS
         ]
         self.qt_app, self.window, _ = create_overlay_window(
             debug_callback=self.toggle_debug_window,
@@ -1116,9 +1127,9 @@ class VoiceRecognitionApp:
             print(f"  {labels.get('toggle_recording', '?'):<22} Toggle speech-to-text recording")
             print(f"  {labels.get('toggle_voice_changer', '?'):<22} Toggle voice changer (sharp/funny)")
             print(f"  {labels.get('toggle_vc_routing', '?'):<22} Toggle voice changer output (cable / speaker)")
-            for text, action in TYPED_MACROS:
+            for label, _text, action in TYPED_MACROS:
                 combo = labels.get(action, "Commands ▾ menu") if action else "Commands ▾ menu"
-                print(f"  {combo:<22} Type {text}")
+                print(f"  {combo:<22} Type: {label}")
         except Exception as exc:
             print(f"Initialization failed: {exc}")
             self.update_indicator_safe(idle=True)

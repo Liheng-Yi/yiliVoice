@@ -140,8 +140,9 @@ class StatusWindow(QtWidgets.QWidget):
         self.show_cost = show_cost
         self.show_codex = show_codex
         self._usage_click_cb = usage_click_callback
-        # Typed-command macros: [(text, hotkey hint), ...]. Shown in the
-        # "Commands ▾" footer row (panel mode) and the right-click menu.
+        # Typed-command macros: [(label, typed text, hotkey hint), ...].
+        # Shown in the "Commands ▾" footer row (panel mode) and the
+        # right-click menu.
         self.macros = list(macros or [])
         self._macro_cb = macro_callback
         self.usage_session = None    # int 0-100 or None (not fetched)
@@ -556,11 +557,15 @@ class StatusWindow(QtWidgets.QWidget):
             e.accept()
 
     def _macro_menu_entries(self, menu):
-        """Fill *menu* with one action per macro; returns {action: text}."""
+        """Fill *menu* with one action per macro; returns {action: typed text}.
+
+        The menu shows the short label; picking it types the (possibly much
+        longer) text.
+        """
         entries = {}
-        for text, hint in self.macros:
+        for label, text, hint in self.macros:
             # "\t" puts the hotkey hint in the menu's shortcut column.
-            act = menu.addAction(f"{text}\t{hint}" if hint else text)
+            act = menu.addAction(f"{label}\t{hint}" if hint else label)
             entries[act] = text
         return entries
 
@@ -674,8 +679,9 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
     ``show_usage`` adds the Claude limit bars below the dot, ``show_codex`` the
     blue Codex 7-day limit bar, and ``show_cost`` the ccusage spend rows;
     ``usage_click_callback`` is invoked when the user clicks the meter.
-    ``macros`` is ``[(text, hotkey_hint), ...]`` for the "Commands ▾" footer
-    (also in the right-click menu); picking one calls ``macro_callback(text)``.
+    ``macros`` is ``[(label, text, hotkey_hint), ...]`` for the "Commands ▾"
+    footer (also in the right-click menu); the menu shows ``label`` and picking
+    one calls ``macro_callback(text)``.
 
     Returns ``(qt_app, window, window)``.
     """

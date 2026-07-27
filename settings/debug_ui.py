@@ -492,9 +492,12 @@ class DebugUI:
             "toggle_voice_changer": "Voice Changer",
             "toggle_vc_routing": "Vc Routing",
             "type_review_fix_push": "Type /review-fix-push",
+            "type_pr_comments": "Type PR-comments task",
         }
-        for action in ("toggle_recording", "toggle_voice_changer",
-                       "toggle_vc_routing", "type_review_fix_push"):
+        base = ["toggle_recording", "toggle_voice_changer", "toggle_vc_routing"]
+        # Any extra actions (typed-command macros etc.) follow the toggles.
+        actions = base + [a for a in p.hotkey_labels if a not in base]
+        for action in actions:
             label = _ACTION_LABELS.get(action, action.replace("_", " ").title())
             combo = p.hotkey_labels.get(action, "—")
             lines.append(f"  {label:<22}{combo}")

@@ -54,6 +54,10 @@ TYPED_MACROS = [
      "needed, stop and ask me). After the push, reply to each comment, and "
      "if a reviewer requested changes, re-request their review.",
      "type_pr_comments"),
+    ("Code-review PR: post & approve",
+     "Review this PR with /code-review, then post your findings. If it's "
+     "good to merge, approve it with comments.",
+     "type_code_review_pr"),
 ]
 
 

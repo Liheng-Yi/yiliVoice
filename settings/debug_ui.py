@@ -495,6 +495,7 @@ class DebugUI:
             "type_pr_comments": "Type PR-comments task",
             "type_code_review_pr": "Type code-review task",
             "type_setup_env": "Type env-setup task",
+            "type_slack_request": "Type /slack-request",
         }
         base = ["toggle_recording", "toggle_voice_changer", "toggle_vc_routing"]
         # Any extra actions (typed-command macros etc.) follow the toggles.

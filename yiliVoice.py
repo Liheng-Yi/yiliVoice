@@ -67,6 +67,9 @@ TYPED_MACROS = [
      "port plus one (keep bumping until free), and make sure the frontend "
      "proxy points at the backend's actual port.",
      "type_setup_env"),
+    ("/slack-request",
+     "/slack-request",
+     "type_slack_request"),
 ]
 
 

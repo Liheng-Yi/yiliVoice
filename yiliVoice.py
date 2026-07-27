@@ -59,6 +59,14 @@ TYPED_MACROS = [
      "good to merge, approve it with comments, no need to ask for permission "
      "to post the comments.",
      "type_code_review_pr"),
+    ("Setup env & run localhost",
+     "Follow /worktree-setup but skip creating the worktree — I'm already in "
+     "the right checkout. Provision the local dev environment for both the "
+     "backend and the frontend, then start both servers yourself and keep "
+     "them running on localhost. If a port is occupied, use the occupied "
+     "port plus one (keep bumping until free), and make sure the frontend "
+     "proxy points at the backend's actual port.",
+     "type_setup_env"),
 ]
 
 

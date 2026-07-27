@@ -186,6 +186,7 @@ _OS_TABLE = {
             "type_review_fix_push": "ctrl+alt+1",
             "type_pr_comments": "ctrl+alt+2",
             "type_code_review_pr": "ctrl+alt+3",
+            "type_setup_env": "ctrl+alt+4",
         },
         "hotkey_labels": {
             "toggle_recording": "Pause / Break",
@@ -194,6 +195,7 @@ _OS_TABLE = {
             "type_review_fix_push": "Ctrl+Alt+1",
             "type_pr_comments": "Ctrl+Alt+2",
             "type_code_review_pr": "Ctrl+Alt+3",
+            "type_setup_env": "Ctrl+Alt+4",
         },
         "virtual_cable_keywords": ["cable", "virtual", "voicemeeter"],
         "virtual_cable_setup": _VB_CABLE_SETUP,
@@ -208,6 +210,7 @@ _OS_TABLE = {
             "type_review_fix_push": "<cmd>+<ctrl>+1",
             "type_pr_comments": "<cmd>+<ctrl>+2",
             "type_code_review_pr": "<cmd>+<ctrl>+3",
+            "type_setup_env": "<cmd>+<ctrl>+4",
         },
         "hotkey_labels": {
             "toggle_recording": "Right ⌘ (Command)",
@@ -216,6 +219,7 @@ _OS_TABLE = {
             "type_review_fix_push": "Cmd+Ctrl+1",
             "type_pr_comments": "Cmd+Ctrl+2",
             "type_code_review_pr": "Cmd+Ctrl+3",
+            "type_setup_env": "Cmd+Ctrl+4",
         },
         "virtual_cable_keywords": ["blackhole", "loopback", "cable", "aggregate", "multi-output"],
         "virtual_cable_setup": _BLACKHOLE_SETUP,
@@ -234,6 +238,7 @@ _OS_TABLE = {
             "type_review_fix_push": "<ctrl>+<alt>+1",
             "type_pr_comments": "<ctrl>+<alt>+2",
             "type_code_review_pr": "<ctrl>+<alt>+3",
+            "type_setup_env": "<ctrl>+<alt>+4",
         },
         "hotkey_labels": {
             "toggle_recording": "Ctrl+Alt+V",
@@ -242,6 +247,7 @@ _OS_TABLE = {
             "type_review_fix_push": "Ctrl+Alt+1",
             "type_pr_comments": "Ctrl+Alt+2",
             "type_code_review_pr": "Ctrl+Alt+3",
+            "type_setup_env": "Ctrl+Alt+4",
         },
         "virtual_cable_keywords": ["cable", "virtual", "loopback", "null", "monitor"],
         "virtual_cable_setup": _PULSE_SETUP,

@@ -494,6 +494,7 @@ class DebugUI:
             "type_review_fix_push": "Type /review-fix-push",
             "type_pr_comments": "Type PR-comments task",
             "type_code_review_pr": "Type code-review task",
+            "type_setup_env": "Type env-setup task",
         }
         base = ["toggle_recording", "toggle_voice_changer", "toggle_vc_routing"]
         # Any extra actions (typed-command macros etc.) follow the toggles.

@@ -27,9 +27,15 @@ from .hotkeys import prewarm_macos_key_layout
 class TextTyper:
     """Types text into the focused window using the fastest available backend."""
 
+    # A slash-command autocomplete popup needs a beat to appear before Tab can
+    # accept the highlighted entry, and a beat afterwards for the accepted text
+    # to land before the rest of the macro arrives.
+    _TAB_SETTLE = 0.25
+
     def __init__(self):
         self.backend_name = "none"
         self._release_modifiers = lambda: None  # set per-backend below
+        self._press_tab = lambda: None          # set per-backend below
         self._type = self._make_backend()
 
     def _make_backend(self):
@@ -40,6 +46,7 @@ class TextTyper:
             controller = Controller()
             self.backend_name = "pynput"
             self._release_modifiers = self._pynput_modifier_releaser(controller, Key)
+            self._press_tab = self._pynput_tapper(controller, Key.tab)
             return controller.type
         except Exception:
             pass
@@ -49,6 +56,7 @@ class TextTyper:
 
             self.backend_name = "keyboard"
             self._release_modifiers = lambda: self._keyboard_release_modifiers(keyboard)
+            self._press_tab = lambda: keyboard.send("tab")
             return keyboard.write
         except Exception:
             pass
@@ -56,6 +64,7 @@ class TextTyper:
         import pyautogui
 
         self.backend_name = "pyautogui"
+        self._press_tab = lambda: pyautogui.press("tab")
         return lambda text: pyautogui.write(text, interval=0)
 
     @staticmethod
@@ -82,6 +91,15 @@ class TextTyper:
         return release
 
     @staticmethod
+    def _pynput_tapper(controller, key):
+        """Return a fn that presses and releases *key* once."""
+        def tap():
+            controller.press(key)
+            controller.release(key)
+
+        return tap
+
+    @staticmethod
     def _keyboard_release_modifiers(keyboard):
         for name in ("ctrl", "alt", "shift", "windows", "cmd"):
             try:
@@ -102,6 +120,9 @@ class TextTyper:
         clobbering the focused app. We release the common modifiers and pause
         briefly so the physical keys are up, then type normally.
 
+        A ``\\t`` in *text* becomes a real Tab keypress rather than whitespace —
+        see :meth:`_type_with_tabs`.
+
         Call from a worker thread: the pause would otherwise block the caller
         (a hotkey listener thread).
         """
@@ -113,7 +134,29 @@ class TextTyper:
             pass
         if pre_delay:
             time.sleep(pre_delay)
-        self._type(text)
+        self._type_with_tabs(text)
+
+    def _type_with_tabs(self, text: str) -> None:
+        """Type *text*, sending a Tab keypress wherever it contains ``\\t``.
+
+        Macros that invoke a slash command need this: a chat input only turns
+        the typed ``/code-review`` into a real command once Tab accepts the
+        autocomplete entry, and typing a literal tab character would just
+        insert whitespace and leave the command as plain text. Splitting here
+        (rather than at the macro definition) keeps the registry a flat list of
+        strings.
+        """
+        segments = text.split("\t")
+        for i, segment in enumerate(segments):
+            if segment:
+                self._type(segment)
+            if i < len(segments) - 1:
+                time.sleep(self._TAB_SETTLE)
+                try:
+                    self._press_tab()
+                except Exception:
+                    pass
+                time.sleep(self._TAB_SETTLE)
 
 
 def stable_prefix(text: str, holdback_words: int) -> str:

@@ -44,9 +44,15 @@ except Exception:
 # later: append a row here — it shows up in the menu automatically; to also
 # give it a hotkey, add the action under the same name to
 # settings/platform_profile.py's _OS_TABLE.
+#
+# A macro that invokes a slash command must put it FIRST and follow it with a
+# `\t`: chat inputs only treat `/code-review` as a command when it leads the
+# prompt and Tab accepts the autocomplete entry — mid-sentence it stays plain
+# text. TextTyper turns the `\t` into a real Tab keypress; everything after it
+# is passed to the command as its arguments.
 TYPED_MACROS = [
     ("/review-fix-push",
-     "/review-fix-push",
+     "/review-fix-push\t",
      "type_review_fix_push"),
     ("PR comments: fix, push & reply",
      "There are some comments under this PR. Review them; for each blocker "
@@ -55,20 +61,20 @@ TYPED_MACROS = [
      "if a reviewer requested changes, re-request their review.",
      "type_pr_comments"),
     ("Code-review PR: post & approve",
-     "Review this PR with /code-review, then post your findings. If it's "
-     "good to merge, approve it with comments, no need to ask for permission "
-     "to post the comments.",
+     "/code-review\tReview this PR, then post your findings. If it's good to "
+     "merge, approve it with comments, no need to ask for permission to post "
+     "the comments.",
      "type_code_review_pr"),
     ("Setup env & run localhost",
-     "Follow /worktree-setup but skip creating the worktree — I'm already in "
-     "the right checkout. Provision the local dev environment for both the "
-     "backend and the frontend, then start both servers yourself and keep "
-     "them running on localhost. If a port is occupied, use the occupied "
-     "port plus one (keep bumping until free), and make sure the frontend "
-     "proxy points at the backend's actual port.",
+     "/worktree-setup\tSkip creating the worktree — I'm already in the right "
+     "checkout. Provision the local dev environment for both the backend and "
+     "the frontend, then start both servers yourself and keep them running "
+     "on localhost. If a port is occupied, use the occupied port plus one "
+     "(keep bumping until free), and make sure the frontend proxy points at "
+     "the backend's actual port.",
      "type_setup_env"),
     ("/slack-request",
-     "/slack-request",
+     "/slack-request\t",
      "type_slack_request"),
 ]
 

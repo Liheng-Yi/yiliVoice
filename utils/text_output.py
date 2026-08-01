@@ -120,8 +120,8 @@ class TextTyper:
         clobbering the focused app. We release the common modifiers and pause
         briefly so the physical keys are up, then type normally.
 
-        A ``\\t`` in *text* becomes a real Tab keypress rather than whitespace —
-        see :meth:`_type_with_tabs`.
+        A ``\\t`` in *text* becomes a real Tab keypress plus a space rather than
+        whitespace — see :meth:`_type_with_tabs`.
 
         Call from a worker thread: the pause would otherwise block the caller
         (a hotkey listener thread).
@@ -137,14 +137,21 @@ class TextTyper:
         self._type_with_tabs(text)
 
     def _type_with_tabs(self, text: str) -> None:
-        """Type *text*, sending a Tab keypress wherever it contains ``\\t``.
+        """Type *text*, sending Tab + a space wherever it contains ``\\t``.
 
         Macros that invoke a slash command need this: a chat input only turns
         the typed ``/code-review`` into a real command once Tab accepts the
         autocomplete entry, and typing a literal tab character would just
-        insert whitespace and leave the command as plain text. Splitting here
-        (rather than at the macro definition) keeps the registry a flat list of
-        strings.
+        insert whitespace and leave the command as plain text.
+
+        Accepting the entry does **not** leave a separator behind, so we add
+        the space ourselves — otherwise the macro's next word lands flush
+        against the command (``/code-reviewReview this PR``) and the command
+        stops matching. The space is skipped when the following segment already
+        starts with one, so a macro can't end up double-spaced.
+
+        Splitting here (rather than at the macro definition) keeps the registry
+        a flat list of strings.
         """
         segments = text.split("\t")
         for i, segment in enumerate(segments):
@@ -157,6 +164,8 @@ class TextTyper:
                 except Exception:
                     pass
                 time.sleep(self._TAB_SETTLE)
+                if not segments[i + 1].startswith(" "):
+                    self._type(" ")
 
 
 def stable_prefix(text: str, holdback_words: int) -> str:

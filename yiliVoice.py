@@ -60,10 +60,15 @@ TYPED_MACROS = [
      "needed, stop and ask me). After the push, reply to each comment, and "
      "if a reviewer requested changes, re-request their review.",
      "type_pr_comments"),
-    ("Code-review PR: post & approve",
-     "/code-review\tReview this PR, then post your findings. If it's good to "
-     "merge, approve it with comments, no need to ask for permission to post "
-     "the comments.",
+    # The post/approve/watch protocol lives in ~/.claude/commands/
+    # pr-review-watch.md so it can be edited without an app restart; the
+    # macro just types /code-review (which must be user-typed — the skill is
+    # model-invocation-disabled) and points at the file.
+    ("Code-review PR: post, approve & watch",
+     "/code-review\tThen follow ~/.claude/commands/pr-review-watch.md: post "
+     "the findings, approve if it's good to merge (no need to ask permission "
+     "to post), then watch the PR for new pushes and re-review each one "
+     "until it's merged or I stop you.",
      "type_code_review_pr"),
     ("Setup env & run localhost",
      "/worktree-setup\tSkip creating the worktree — I'm already in the right "

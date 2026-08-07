@@ -6,3 +6,4 @@ tempCodeRunnerFile.py
 .venv/
 venv/
 env/
+.venv-old/

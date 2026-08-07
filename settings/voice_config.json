@@ -1,14 +1,17 @@
 {
-  "model": "medium",
+  "model": "small",
   "non_english": false,
+  "platform_override": "auto",
   "energy_threshold": 1000,
   "record_timeout": 1.5,
-  "phrase_timeout": 1.0,
+  "phrase_timeout": 0.8,
   "volume_threshold": 0.008,
   "no_speech_threshold": 0.6,
-  "trailing_silence": 0.8,
+  "trailing_silence": 0.25,
   "threshold_adjustment": 1.0,
   "inactivity_timeout": 600,
   "selected_microphone_index": 0,
-  "timestamp": "2025-09-23T15:36:17.090990"
+  "window_x": 1549,
+  "window_y": 65,
+  "timestamp": "2026-08-06T21:40:28.140177"
 }

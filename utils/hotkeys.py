@@ -22,6 +22,38 @@ import time
 
 
 _macos_layout_patched = False
+_macos_ax_warmed = False
+
+
+def prewarm_macos_ax_trusted():
+    """Resolve ``HIServices.AXIsProcessTrusted`` on the main thread, once.
+
+    Each pynput listener thread calls ``HIServices.AXIsProcessTrusted()`` as it
+    starts. PyObjC's lazy symbol import isn't thread-safe: when two listener
+    threads resolve the same symbol at once, one pops the lookup-table entry
+    the other already removed → ``KeyError: 'AXIsProcessTrusted'``, which kills
+    that listener thread. Touching the symbol here (on the main thread, before
+    any listener starts) binds it so the threads only ever read it.
+
+    A no-op off macOS and after the first call.
+    """
+    global _macos_ax_warmed
+    if _macos_ax_warmed or sys.platform != "darwin":
+        return
+    try:
+        import HIServices
+        HIServices.AXIsProcessTrusted()
+        # Also bind the ApplicationServices variants our permission check uses.
+        try:
+            from ApplicationServices import (  # noqa: F401
+                AXIsProcessTrusted,
+                AXIsProcessTrustedWithOptions,
+            )
+        except Exception:
+            pass
+        _macos_ax_warmed = True
+    except Exception as exc:
+        print(f"[Hotkeys] AX pre-warm skipped: {exc}")
 
 
 def prewarm_macos_key_layout():
@@ -261,9 +293,11 @@ class PynputHotkeys(HotkeyManager):
             return
         from pynput import keyboard
 
-        # macOS: cache the keyboard layout on the main thread so pynput's
-        # listener thread never calls the main-thread-only TIS APIs (SIGTRAP).
+        # macOS: do the thread-unsafe one-time resolutions on the main thread
+        # before any listener starts — the keyboard layout (TIS, else SIGTRAP)
+        # and AXIsProcessTrusted (PyObjC lazy import, else KeyError races).
         prewarm_macos_key_layout()
+        prewarm_macos_ax_trusted()
 
         combo_map = {}
         single_map = {}    # pynput Key -> action (bare special keys)

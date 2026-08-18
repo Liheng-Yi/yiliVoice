@@ -67,6 +67,42 @@ def parse_session_reset(text: str):
     return tail.group(1).strip() if tail else None
 
 
+# A bare clock time, 12- or 24-hour: "8:49pm", "8pm", "20:49".
+_CLOCK_ONLY_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
+
+
+def clock_to_utc(clock: str):
+    """Convert a local wall-clock string like ``"8:49pm"`` to UTC ``"HH:MM"``.
+
+    ``parse_session_reset`` reports the reset in the machine's local time,
+    which is awkward to compare against anything that speaks UTC.  Returns
+    ``None`` when the string isn't a plain clock time — that line sometimes
+    carries a date or a phrase instead — so the caller can hide the UTC
+    reading rather than show something wrong.
+
+    Today's local date supplies the UTC offset, so the result stays right
+    across DST changes.  Only the time of day comes back; a late-evening reset
+    may well land on tomorrow's UTC date.
+    """
+    text = (clock or "").strip().lower().replace(".", "").replace(" ", "")
+    m = _CLOCK_ONLY_RE.match(text)
+    if not m:
+        return None
+    hour, minute, suffix = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+    if minute > 59:
+        return None
+    if suffix:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if suffix == "pm" else 0)
+    elif hour > 23:
+        return None
+    local = datetime.datetime.combine(
+        datetime.date.today(), datetime.time(hour, minute)
+    )
+    return local.astimezone(datetime.timezone.utc).strftime("%H:%M")
+
+
 def claude_executable():
     """Absolute path to the ``claude`` CLI, or ``None`` if not on PATH."""
     return shutil.which("claude")

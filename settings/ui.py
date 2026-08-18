@@ -22,6 +22,8 @@ import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from utils.usage import clock_to_utc
+
 
 # --- colours --------------------------------------------------------------- #
 BG = "#0f1115"
@@ -111,7 +113,7 @@ class StatusWindow(QtWidgets.QWidget):
     DOT_D = 26                      # dot diameter in panel mode
     _PAD = 5
     _ROW_H = 15
-    _ROWS_TOP = _PAD + DOT_D + 6    # y where the first meter row starts
+    _HEAD_LINE_H = 11               # one line of the header stack beside the dot
     _CMD_H = 17                     # "Commands ▾" footer row height
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
@@ -148,6 +150,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.usage_session = None    # int 0-100 or None (not fetched)
         self.usage_week = None
         self.session_reset = None    # 5-hour window reset time, e.g. "8:49pm"
+        self.session_reset_utc = None  # the same instant in UTC, e.g. "03:49"
         self.usage_codex = None       # Codex 7-day limit %, int 0-100 or None
         self.codex_reset = None       # Codex 7-day reset date, e.g. "Jul 17"
         self.cost_today = None        # float USD or None
@@ -164,6 +167,13 @@ class StatusWindow(QtWidgets.QWidget):
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
         self._has_cmd_row = self._has_panel and bool(self.macros)
+
+        # The header sits right of the dot and stacks one line per reading:
+        # reset time, that time in UTC, refresh countdown — or the countdown
+        # alone in cost-only mode. It never shrinks below the dot itself.
+        head_lines = 3 if show_usage else 1
+        self._header_h = max(self.DOT_D, head_lines * self._HEAD_LINE_H)
+        self._rows_top = self._PAD + self._header_h + 6  # first meter row's y
 
         self._drag_offset = None
         self._press_pos = None
@@ -189,7 +199,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")  # override app QSS bg
         if self._has_panel:
-            height = self._ROWS_TOP + self._n_rows * self._ROW_H + self._PAD
+            height = self._rows_top + self._n_rows * self._ROW_H + self._PAD
             if self._has_cmd_row:
                 height += self._CMD_H
             self.setFixedSize(self.USAGE_W, height)
@@ -277,10 +287,16 @@ class StatusWindow(QtWidgets.QWidget):
         self.update()  # trigger repaint
 
     def set_usage(self, session, week, session_reset=None) -> None:
-        """Update session/weekly limit % (ints) and the 5-hour reset (str)."""
+        """Update session/weekly limit % (ints) and the 5-hour reset (str).
+
+        The UTC reading is derived here rather than at paint time — the header
+        repaints once a second for the countdown, and the conversion only
+        changes when a poll brings a new reset time.
+        """
         self.usage_session = session
         self.usage_week = week
         self.session_reset = session_reset
+        self.session_reset_utc = clock_to_utc(session_reset)
         self._refresh_tooltip()
         self.update()
 
@@ -340,7 +356,10 @@ class StatusWindow(QtWidgets.QWidget):
                 f"Claude limit — session {pct(self.usage_session)} · "
                 f"week {pct(self.usage_week)}"
             )
-            lines.append(f"5-hour window resets at {self.session_reset or '…'}")
+            utc = f" (UTC {self.session_reset_utc})" if self.session_reset_utc else ""
+            lines.append(
+                f"5-hour window resets at {self.session_reset or '…'}{utc}"
+            )
         if self.show_codex:
             reset = f" · resets {self.codex_reset}" if self.codex_reset else ""
             lines.append(f"Codex 7-day limit — {pct(self.usage_codex)}{reset}")
@@ -398,38 +417,44 @@ class StatusWindow(QtWidgets.QWidget):
         p.end()
 
     def _paint_header(self, p):
-        """Right-aligned header stack next to the dot: reset time, then the
-        refresh countdown beneath it."""
+        """Right-aligned header stack next to the dot: the 5-hour reset time,
+        that same time in UTC, then the refresh countdown."""
         w = self.USAGE_W - 2 * self._PAD
-        half = self.DOT_D // 2
+        line = self._HEAD_LINE_H
+        right = QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight
         font = QtGui.QFont()
+        y = self._PAD
 
         if self.show_usage:
-            # 5-hour reset time on the top line.
+            # 5-hour reset in local time, then the UTC equivalent under it.
             font.setPixelSize(10)
             p.setFont(font)
             p.setPen(QtGui.QColor(FG))
-            p.drawText(QtCore.QRect(self._PAD, self._PAD, w, half),
-                       QtCore.Qt.AlignBottom | QtCore.Qt.AlignRight,
+            p.drawText(QtCore.QRect(self._PAD, y, w, line), right,
                        self.session_reset or "…")
-            countdown_rect = QtCore.QRect(self._PAD, self._PAD + half, w, self.DOT_D - half)
-            countdown_align = QtCore.Qt.AlignTop | QtCore.Qt.AlignRight
+            y += line
+            font.setPixelSize(9)
+            p.setFont(font)
+            p.setPen(QtGui.QColor(MUTED))
+            p.drawText(QtCore.QRect(self._PAD, y, w, line), right,
+                       f"UTC: {self.session_reset_utc or '--:--'}")
+            y += line
+            countdown_rect = QtCore.QRect(self._PAD, y, w, line)
         else:
             # No reset time (cost-only) — center the countdown in the header.
-            countdown_rect = QtCore.QRect(self._PAD, self._PAD, w, self.DOT_D)
-            countdown_align = QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight
+            countdown_rect = QtCore.QRect(self._PAD, self._PAD, w, self._header_h)
 
         font.setPixelSize(9)
         p.setFont(font)
         p.setPen(QtGui.QColor(MUTED))
-        p.drawText(countdown_rect, countdown_align, self._countdown_text())
+        p.drawText(countdown_rect, right, self._countdown_text())
 
     def _paint_panel(self, p):
         font = QtGui.QFont()
         font.setPixelSize(10)
         p.setFont(font)
         for i, spec in enumerate(self._row_specs()):
-            row_top = self._ROWS_TOP + i * self._ROW_H
+            row_top = self._rows_top + i * self._ROW_H
             if spec[0] == "bar":
                 self._paint_bar_row(p, row_top, spec[1], spec[2])
             else:
@@ -463,7 +488,7 @@ class StatusWindow(QtWidgets.QWidget):
 
     def _cmd_row_top(self):
         """y where the "Commands ▾" footer row starts."""
-        return self._ROWS_TOP + self._n_rows * self._ROW_H
+        return self._rows_top + self._n_rows * self._ROW_H
 
     def _paint_cmd_row(self, p):
         """Dropdown-style footer button that opens the typed-commands menu."""

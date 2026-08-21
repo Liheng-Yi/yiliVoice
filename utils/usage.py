@@ -50,11 +50,20 @@ def parse_usage(text: str):
 
 # The "current session" line is the 5-hour rolling window; grab its reset time.
 _SESSION_LINE_RE = re.compile(r"current session:[^\n]*", re.IGNORECASE)
-_CLOCK_RE = re.compile(r"(\d{1,2}:\d{2}\s*[ap]\.?m\.?)", re.IGNORECASE)
+# The minutes are optional: a reset on the hour is written "3am", not "3:00am".
+_CLOCK_RE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?)", re.IGNORECASE)
+_CLOCK24_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
 
 
 def parse_session_reset(text: str):
-    """Return when the 5-hour session window resets, e.g. ``"8:49pm"`` (or None)."""
+    """Return when the 5-hour session window resets, e.g. ``"8:49pm"`` (or None).
+
+    Only ever a time of day. The line it comes from carries a date too —
+    ``resets Aug 21 at 3am`` — but the meter has one narrow line to show this
+    in, and the date is noise next to a window that never spans more than five
+    hours. ``None`` when no clock is in there at all, which is what a
+    brand-new session with nothing used yet reports.
+    """
     text = text or ""
     m = _SESSION_LINE_RE.search(text)
     if not m:
@@ -63,8 +72,8 @@ def parse_session_reset(text: str):
     clock = _CLOCK_RE.search(line)
     if clock:
         return re.sub(r"\s+", "", clock.group(1)).lower()  # "8:49 pm" -> "8:49pm"
-    tail = re.search(r"resets\s+(.+?)(?:\s*\(|$)", line, re.IGNORECASE)
-    return tail.group(1).strip() if tail else None
+    clock24 = _CLOCK24_RE.search(line)
+    return clock24.group(0) if clock24 else None
 
 
 # A bare clock time, 12- or 24-hour: "8:49pm", "8pm", "20:49".

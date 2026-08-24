@@ -137,7 +137,7 @@ class StatusWindow(QtWidgets.QWidget):
         # Meter panel state. It shows up to three groups of rows:
         #   * usage — Claude session + weekly limit bars (no letters), from /usage
         #   * codex — Codex 7-day limit bar (always blue), from rollout logs
-        #   * cost  — today's spend (from ccusage; the month total is tooltip-only)
+        #   * cost  — today + this-month spend (from ccusage)
         self.show_usage = show_usage
         self.show_cost = show_cost
         self.show_codex = show_codex
@@ -154,7 +154,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.usage_codex = None       # Codex 7-day limit %, int 0-100 or None
         self.codex_reset = None       # Codex 7-day reset date, e.g. "Jul 17"
         self.cost_today = None        # float USD or None
-        self.cost_month = None        # month-to-date USD; shown in the tooltip only
+        self.cost_month = None        # this month so far (month-to-date) USD
         self._press_local = None     # widget-local press point (dot vs panel)
 
         # Refresh countdown (footer). ``_refresh_deadline`` is a time.monotonic()
@@ -163,7 +163,7 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_deadline = None
 
         n_rows = ((2 if show_usage else 0) + (1 if show_codex else 0)
-                  + (1 if show_cost else 0))
+                  + (2 if show_cost else 0))
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
         self._has_cmd_row = self._has_panel and bool(self.macros)
@@ -239,8 +239,8 @@ class StatusWindow(QtWidgets.QWidget):
         if self.show_codex:
             rows.append(("bar", self.usage_codex, self._USAGE_CODEX))
         if self.show_cost:
-            # Today only — the month total is a tooltip reading, not worth a row.
             rows.append(("text", "Today", self._fmt_cost(self.cost_today)))
+            rows.append(("text", "Month", self._fmt_cost(self.cost_month)))
         return rows
 
     # -- public API used by the app ------------------------------------- #

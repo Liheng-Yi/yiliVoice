@@ -879,9 +879,10 @@ class VoiceRecognitionApp:
     def _poll_usage(self):
         """Fetch session/weekly limit % + 5h reset via `claude -p /usage`."""
         try:
-            session, week, reset = fetch_usage()
-            if session is not None or week is not None or reset is not None:
-                self.update_usage_safe(session, week, reset)
+            session, week, fable, reset = fetch_usage()
+            if (session is not None or week is not None
+                    or fable is not None or reset is not None):
+                self.update_usage_safe(session, week, fable, reset)
             else:
                 print("[Usage] /usage returned no panel (CLI print mode is flaky); "
                       "limit bars stay blank this cycle.")
@@ -962,9 +963,9 @@ class VoiceRecognitionApp:
                 if update_type == 'indicator':
                     update_indicator(self.canvas, self.indicator, args[0])
                 elif update_type == 'usage':
-                    session, week, reset = args[0]
+                    session, week, fable, reset = args[0]
                     if hasattr(self.window, 'set_usage'):
-                        self.window.set_usage(session, week, reset)
+                        self.window.set_usage(session, week, fable, reset)
                 elif update_type == 'codex':
                     week, reset = args[0]
                     if hasattr(self.window, 'set_codex_usage'):
@@ -1020,9 +1021,9 @@ class VoiceRecognitionApp:
         """Ask the usage monitor to re-poll now (bound to a usage-panel click)."""
         self.usage_refresh_event.set()
 
-    def update_usage_safe(self, session, week, session_reset=None):
+    def update_usage_safe(self, session, week, fable=None, session_reset=None):
         """Thread-safe push of limit % + 5-hour reset time to the dot."""
-        self.ui_update_queue.put(('usage', (session, week, session_reset)))
+        self.ui_update_queue.put(('usage', (session, week, fable, session_reset)))
 
     def update_codex_safe(self, week, week_reset=None):
         """Thread-safe push of the Codex 7-day limit % to the dot."""

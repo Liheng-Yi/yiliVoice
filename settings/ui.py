@@ -115,6 +115,9 @@ class StatusWindow(QtWidgets.QWidget):
     _ROW_H = 15
     _HEAD_LINE_H = 11               # one line of the header stack beside the dot
     _CMD_H = 17                     # "Commands ▾" footer row height
+    # Gutter left of every bar for its one-letter tag. Applied to all bar rows
+    # (not just the labelled ones) so every bar keeps the same length.
+    _BAR_LABEL_W = 9
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -135,7 +138,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.state = "loading"
 
         # Meter panel state. It shows up to three groups of rows:
-        #   * usage — Claude session + weekly limit bars (no letters), from /usage
+        #   * usage — Claude session + weekly + Fable ("F") bars, from /usage
         #   * codex — Codex 7-day limit bar (always blue), from rollout logs
         #   * cost  — today + this-month spend (from ccusage)
         self.show_usage = show_usage
@@ -151,6 +154,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.usage_week = None
         self.session_reset = None    # 5-hour window reset time, e.g. "8:49pm"
         self.session_reset_utc = None  # the same instant in UTC, e.g. "03:49"
+        self.usage_fable = None       # Fable weekly limit %, int 0-100 or None
         self.usage_codex = None       # Codex 7-day limit %, int 0-100 or None
         self.codex_reset = None       # Codex 7-day reset date, e.g. "Jul 17"
         self.cost_today = None        # float USD or None
@@ -162,7 +166,7 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_interval = None
         self._refresh_deadline = None
 
-        n_rows = ((2 if show_usage else 0) + (1 if show_codex else 0)
+        n_rows = ((3 if show_usage else 0) + (1 if show_codex else 0)
                   + (2 if show_cost else 0))
         self._n_rows = n_rows
         self._has_panel = n_rows > 0
@@ -228,16 +232,18 @@ class StatusWindow(QtWidgets.QWidget):
     def _row_specs(self):
         """Ordered meter rows.
 
-        ``("bar", pct, color)`` draws a label-less progress bar + percentage
-        (``color=None`` picks the level-based traffic-light fill); ``("text",
-        label, value)`` draws a left label + right value.
+        ``("bar", pct, color, label)`` draws a progress bar + percentage with a
+        one-letter tag in the left gutter (``label=None`` leaves the gutter
+        blank; ``color=None`` picks the level-based traffic-light fill);
+        ``("text", label, value)`` draws a left label + right value.
         """
         rows = []
         if self.show_usage:
-            rows.append(("bar", self.usage_session, None))
-            rows.append(("bar", self.usage_week, None))
+            rows.append(("bar", self.usage_session, None, None))
+            rows.append(("bar", self.usage_week, None, None))
+            rows.append(("bar", self.usage_fable, None, "F"))
         if self.show_codex:
-            rows.append(("bar", self.usage_codex, self._USAGE_CODEX))
+            rows.append(("bar", self.usage_codex, self._USAGE_CODEX, None))
         if self.show_cost:
             rows.append(("text", "Today", self._fmt_cost(self.cost_today)))
             rows.append(("text", "Month", self._fmt_cost(self.cost_month)))
@@ -286,8 +292,8 @@ class StatusWindow(QtWidgets.QWidget):
         self._refresh_tooltip()
         self.update()  # trigger repaint
 
-    def set_usage(self, session, week, session_reset=None) -> None:
-        """Update session/weekly limit % (ints) and the 5-hour reset (str).
+    def set_usage(self, session, week, fable=None, session_reset=None) -> None:
+        """Update session/weekly/Fable limit % (ints) and the 5-hour reset (str).
 
         The UTC reading is derived here rather than at paint time — the header
         repaints once a second for the countdown, and the conversion only
@@ -295,6 +301,7 @@ class StatusWindow(QtWidgets.QWidget):
         """
         self.usage_session = session
         self.usage_week = week
+        self.usage_fable = fable
         self.session_reset = session_reset
         self.session_reset_utc = clock_to_utc(session_reset)
         self._refresh_tooltip()
@@ -354,7 +361,7 @@ class StatusWindow(QtWidgets.QWidget):
         if self.show_usage:
             lines.append(
                 f"Claude limit — session {pct(self.usage_session)} · "
-                f"week {pct(self.usage_week)}"
+                f"week {pct(self.usage_week)} · Fable {pct(self.usage_fable)}"
             )
             utc = f" (UTC {self.session_reset_utc})" if self.session_reset_utc else ""
             lines.append(
@@ -456,21 +463,30 @@ class StatusWindow(QtWidgets.QWidget):
         for i, spec in enumerate(self._row_specs()):
             row_top = self._rows_top + i * self._ROW_H
             if spec[0] == "bar":
-                self._paint_bar_row(p, row_top, spec[1], spec[2])
+                self._paint_bar_row(p, row_top, spec[1], spec[2], spec[3])
             else:
                 self._paint_text_row(p, row_top, spec[1], spec[2])
 
-    def _paint_bar_row(self, p, row_top, pct, color=None):
-        """A label-less progress bar + percentage.
+    def _paint_bar_row(self, p, row_top, pct, color=None, label=None):
+        """A progress bar + percentage, with an optional one-letter tag.
 
         ``color`` forces a fixed fill (Codex's blue); ``None`` picks the
         level-based traffic-light colour (Claude's session/weekly bars).
+        ``label`` is drawn in the left gutter — that gutter is reserved on
+        every bar row, labelled or not, so all the bars stay the same length
+        and line up with each other.
         """
         val_x = self.USAGE_W - self._PAD - 30
-        bar_x = self._PAD + 1
+        gutter_x = self._PAD + 1
+        bar_x = gutter_x + self._BAR_LABEL_W
         bar_w = val_x - bar_x - 6
         bar_h = 6
         bar_y = row_top + (self._ROW_H - bar_h) // 2
+
+        if label:
+            p.setPen(QtGui.QColor(MUTED))
+            p.drawText(QtCore.QRect(gutter_x, row_top, self._BAR_LABEL_W, self._ROW_H),
+                       QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, label)
 
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(QtGui.QColor(55, 65, 81))  # #374151 track

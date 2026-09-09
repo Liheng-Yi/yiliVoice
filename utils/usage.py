@@ -30,22 +30,28 @@ import threading
 import time
 
 _SESSION_RE = re.compile(r"current session:\s*(\d+)\s*%", re.IGNORECASE)
-# Prefer the "(all models)" weekly line; fall back to the first weekly line.
+# Prefer the "(all models)" weekly line; fall back to the first weekly line
+# that isn't the per-model Fable one (that gets its own bar, and letting the
+# fallback grab it would show the same number twice).
 _WEEK_ALL_RE = re.compile(r"current week\s*\(all models\):\s*(\d+)\s*%", re.IGNORECASE)
-_WEEK_ANY_RE = re.compile(r"current week[^\n]*?:\s*(\d+)\s*%", re.IGNORECASE)
+_WEEK_ANY_RE = re.compile(r"current week(?!\s*\(fable)[^\n]*?:\s*(\d+)\s*%", re.IGNORECASE)
+# The per-model Fable weekly line, e.g. "Current week (Fable): 15% used".
+_WEEK_FABLE_RE = re.compile(r"current week\s*\(fable[^)]*\):\s*(\d+)\s*%", re.IGNORECASE)
 
 
 def parse_usage(text: str):
-    """Extract ``(session_pct, week_pct)`` from ``/usage`` output.
+    """Extract ``(session_pct, week_pct, fable_pct)`` from ``/usage`` output.
 
     Each element is an int 0-100, or ``None`` if that line wasn't found.
     """
     text = text or ""
     s = _SESSION_RE.search(text)
     w = _WEEK_ALL_RE.search(text) or _WEEK_ANY_RE.search(text)
+    f = _WEEK_FABLE_RE.search(text)
     session = int(s.group(1)) if s else None
     week = int(w.group(1)) if w else None
-    return session, week
+    fable = int(f.group(1)) if f else None
+    return session, week, fable
 
 
 # The "current session" line is the 5-hour rolling window; grab its reset time.
@@ -122,14 +128,14 @@ def claude_available() -> bool:
 
 
 def fetch_usage(timeout: float = 30.0):
-    """Run the CLI once and return ``(session_pct, week_pct, session_reset)``.
+    """Run the CLI once, returning ``(session, week, fable, session_reset)``.
 
-    Returns ``(None, None, None)`` if the CLI is missing, times out, or errors —
-    the caller treats that as "no data yet" and keeps the last known value.
+    Returns all-``None`` if the CLI is missing, times out, or errors — the
+    caller treats that as "no data yet" and keeps the last known value.
     """
     exe = claude_executable()
     if not exe:
-        return (None, None, None)
+        return (None, None, None, None)
     try:
         proc = subprocess.run(
             [exe, "-p", "/usage", "--no-session-persistence"],
@@ -138,17 +144,17 @@ def fetch_usage(timeout: float = 30.0):
             timeout=timeout,
         )
     except Exception:
-        return (None, None, None)
+        return (None, None, None, None)
 
     out = proc.stdout
-    session, week = parse_usage(out)
+    session, week, fable = parse_usage(out)
     reset = parse_session_reset(out)
-    if session is None and week is None and reset is None:
+    if session is None and week is None and fable is None and reset is None:
         # Some builds route the panel to stderr; try that too.
         out = proc.stderr
-        session, week = parse_usage(out)
+        session, week, fable = parse_usage(out)
         reset = parse_session_reset(out)
-    return (session, week, reset)
+    return (session, week, fable, reset)
 
 
 # --------------------------------------------------------------------------- #

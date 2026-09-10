@@ -418,6 +418,14 @@ class StatusWindow(QtWidgets.QWidget):
         return
 
     def _refresh_tooltip(self):
+        # In panel mode the hover legend already names every row, and the
+        # header carries the reset time — a tooltip saying it again just
+        # covers the screen under the meter. Dot-only mode has neither, so
+        # there the tooltip stays as the one place the readings are shown.
+        if self._has_panel:
+            self.setToolTip("")
+            return
+
         _, text = STATE_INFO[self.state]
         if self.state in ("ready", "idle"):
             text = f"{text} — {self.hotkey_label}"

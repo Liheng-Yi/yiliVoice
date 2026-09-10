@@ -118,6 +118,10 @@ class StatusWindow(QtWidgets.QWidget):
     # Gutter left of every bar for its one-letter tag. Applied to all bar rows
     # (not just the labelled ones) so every bar keeps the same length.
     _BAR_LABEL_W = 9
+    # Hover legend: a second panel that slides out to the LEFT naming what each
+    # row measures. _LEGEND_GAP is the transparent seam between the two panels.
+    _LEGEND_W = 112
+    _LEGEND_GAP = 4
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -160,6 +164,12 @@ class StatusWindow(QtWidgets.QWidget):
         self.cost_today = None        # float USD or None
         self.cost_month = None        # this month so far (month-to-date) USD
         self._press_local = None     # widget-local press point (dot vs panel)
+        # Hover legend. While open the window is _LEGEND_W wider and sits that
+        # much further left, so the meter itself stays put on screen;
+        # _legend_shift is how far it actually moved (less, when clamped at the
+        # screen edge) so collapsing can put it back exactly.
+        self._legend_open = False
+        self._legend_shift = 0
 
         # Refresh countdown (footer). ``_refresh_deadline`` is a time.monotonic()
         # value; ``note_refreshed`` sets it at the start of each poll's wait.
@@ -249,6 +259,61 @@ class StatusWindow(QtWidgets.QWidget):
             rows.append(("text", "Month", self._fmt_cost(self.cost_month)))
         return rows
 
+    def _legend_specs(self):
+        """One caption per meter row, in the same order as ``_row_specs``."""
+        rows = []
+        if self.show_usage:
+            rows.append("Claude 5h window")
+            rows.append("Claude week (all)")
+            rows.append("Fable week")
+        if self.show_codex:
+            rows.append("Codex 7 days")
+        if self.show_cost:
+            rows.append("Spend today")
+            rows.append("Spend this month")
+        return rows
+
+    def _x0(self):
+        """Left offset of the meter inside the window (0 unless the legend is open)."""
+        return self._LEGEND_W if self._legend_open else 0
+
+    def _set_legend(self, open_):
+        """Slide the legend out to the left (or back in), keeping the meter put.
+
+        The window grows leftward instead of rightward so the meter never
+        jumps under the cursor. Near the left screen edge there may not be room
+        for the full slide, so the move is clamped and the real distance kept
+        in ``_legend_shift``.
+        """
+        if not self._has_panel or open_ == self._legend_open:
+            return
+        pos = self.pos()
+        h = self.height()
+        if open_:
+            target_x = pos.x() - self._LEGEND_W
+            scr = self.screen()
+            if scr is not None:
+                target_x = max(target_x, scr.availableGeometry().left())
+            self._legend_shift = pos.x() - target_x
+            self._legend_open = True
+            self.setFixedSize(self.USAGE_W + self._LEGEND_W, h)
+            self.move(target_x, pos.y())
+        else:
+            shift = self._legend_shift
+            self._legend_open = False
+            self._legend_shift = 0
+            self.setFixedSize(self.USAGE_W, h)
+            self.move(pos.x() + shift, pos.y())
+        self.update()
+
+    def enterEvent(self, e):
+        super().enterEvent(e)
+        self._set_legend(True)
+
+    def leaveEvent(self, e):
+        super().leaveEvent(e)
+        self._set_legend(False)
+
     # -- public API used by the app ------------------------------------- #
 
     def set_tick_callback(self, cb):
@@ -276,7 +341,10 @@ class StatusWindow(QtWidgets.QWidget):
         self._user_moving = False
         if not self._on_move:
             return
-        pos = (self.pos().x(), self.pos().y())
+        # While the legend is out the window sits _legend_shift px further
+        # left; save where the meter alone would be, or the dot would creep
+        # left by that much on every relaunch.
+        pos = (self.pos().x() + self._legend_shift, self.pos().y())
         if pos == self._last_saved_pos:
             return
         self._last_saved_pos = pos
@@ -402,10 +470,19 @@ class StatusWindow(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         p.setPen(QtCore.Qt.NoPen)
 
+        if self._legend_open:
+            self._paint_legend(p)
+
+        # Everything below is drawn in meter coordinates; when the legend is
+        # out, the whole meter is simply translated right past it.
+        p.save()
+        p.translate(self._x0(), 0)
+
         if self._has_panel:
             # Rounded translucent backdrop so the rows read on any wallpaper.
             p.setBrush(QtGui.QColor(11, 13, 17, self._BACKDROP_ALPHA))
-            p.drawRoundedRect(self.rect(), 10, 10)
+            p.drawRoundedRect(QtCore.QRect(0, 0, self.USAGE_W, self.height()),
+                              10, 10)
 
         dx, dy, d = self._dot_rect()
         # subtle dark halo so the dot stays visible on any background
@@ -421,7 +498,25 @@ class StatusWindow(QtWidgets.QWidget):
             self._paint_panel(p)
             if self._has_cmd_row:
                 self._paint_cmd_row(p)
+        p.restore()
         p.end()
+
+    def _paint_legend(self, p):
+        """Captions naming each meter row, right-aligned against the meter."""
+        w = self._LEGEND_W - self._LEGEND_GAP
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(11, 13, 17, self._BACKDROP_ALPHA))
+        p.drawRoundedRect(QtCore.QRect(0, 0, w, self.height()), 10, 10)
+
+        font = QtGui.QFont()
+        font.setPixelSize(9)
+        p.setFont(font)
+        p.setPen(QtGui.QColor(MUTED))
+        text_w = w - 2 * self._PAD
+        for i, caption in enumerate(self._legend_specs()):
+            y = self._rows_top + i * self._ROW_H
+            p.drawText(QtCore.QRect(self._PAD, y, text_w, self._ROW_H),
+                       QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, caption)
 
     def _paint_header(self, p):
         """Right-aligned header stack next to the dot: the 5-hour reset time,
@@ -533,7 +628,9 @@ class StatusWindow(QtWidgets.QWidget):
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.LeftButton:
             self._press_pos = e.globalPosition().toPoint()
-            self._press_local = e.position().toPoint()
+            # In meter coordinates, so the dot / Commands hit tests below don't
+            # have to know whether the legend is out.
+            self._press_local = e.position().toPoint() - QtCore.QPoint(self._x0(), 0)
             self._press_win_pos = self.pos()
             self._drag_offset = self._press_pos - self.frameGeometry().topLeft()
             self._moved = False

@@ -45,14 +45,16 @@ except Exception:
 # give it a hotkey, add the action under the same name to
 # settings/platform_profile.py's _OS_TABLE.
 #
-# A macro that invokes a slash command must put it FIRST and follow it with a
-# `\t`: chat inputs only treat `/code-review` as a command when it leads the
-# prompt and Tab accepts the autocomplete entry — mid-sentence it stays plain
-# text. TextTyper turns the `\t` into a real Tab keypress; everything after it
-# is passed to the command as its arguments.
+# No macro sends a `\t`. Tab was here to accept a chat input's slash-command
+# autocomplete, but it only lands on the autocomplete when the command leads
+# the prompt — fire a macro with anything already typed (a pasted PR URL, say)
+# and the same Tab reaches the input itself, which breaks the line and splits
+# the macro across two messages. Typing the command as plain text costs an
+# autocomplete that has to be accepted by hand and never mangles the prompt.
+# (TextTyper still honours `\t` if a macro ever needs it again.)
 TYPED_MACROS = [
     ("/review-fix-push",
-     "/review-fix-push\t",
+     "/review-fix-push",
      "type_review_fix_push"),
     ("PR comments: fix, push & reply",
      "There are some comments under this PR. Review them; for each blocker "
@@ -63,15 +65,16 @@ TYPED_MACROS = [
     # The post/approve/watch protocol lives in ~/.claude/commands/
     # pr-review-watch.md so it can be edited without an app restart; the
     # macro just types /code-review (which must be user-typed — the skill is
-    # model-invocation-disabled) and points at the file.
+    # model-invocation-disabled) and points at the file. Accept the
+    # autocomplete yourself before sending.
     ("Code-review PR: post, approve & watch",
-     "/code-review\tThen follow ~/.claude/commands/pr-review-watch.md: post "
+     "/code-review Then follow ~/.claude/commands/pr-review-watch.md: post "
      "the findings, approve if it's good to merge (no need to ask permission "
      "to post), then watch the PR for new pushes and re-review each one "
      "until it's merged or I stop you.",
      "type_code_review_pr"),
     ("Setup env & run localhost",
-     "/worktree-setup\tSkip creating the worktree — I'm already in the right "
+     "/worktree-setup Skip creating the worktree — I'm already in the right "
      "checkout. Provision the local dev environment for both the backend and "
      "the frontend, then start both servers yourself and keep them running "
      "on localhost. If a port is occupied, use the occupied port plus one "
@@ -79,7 +82,7 @@ TYPED_MACROS = [
      "the backend's actual port.",
      "type_setup_env"),
     ("/slack-request",
-     "/slack-request\t",
+     "/slack-request",
      "type_slack_request"),
 ]
 

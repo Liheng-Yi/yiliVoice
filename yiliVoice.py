@@ -56,11 +56,12 @@ TYPED_MACROS = [
     ("/review-fix-push",
      "/review-fix-push",
      "type_review_fix_push"),
-    ("PR comments: fix, push & reply",
+    ("PR comments: fix, push & resolve",
      "There are some comments under this PR. Review them; for each blocker "
      "or issue that is valid, fix it. Push the fixes (if a password is "
-     "needed, stop and ask me). After the push, reply to each comment, and "
-     "if a reviewer requested changes, re-request their review.",
+     "needed, stop and ask me). After the push, reply to each comment and "
+     "then resolve that conversation — don't just reply and leave it open. "
+     "If a reviewer requested changes, re-request their review.",
      "type_pr_comments"),
     # The post/approve/watch protocol lives in ~/.claude/commands/
     # pr-review-watch.md so it can be edited without an app restart; the

@@ -133,8 +133,14 @@ class StatusWindow(QtWidgets.QWidget):
 
     def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None,
                  show_usage=False, show_cost=False, show_codex=False,
-                 usage_click_callback=None, macros=None, macro_callback=None):
+                 usage_click_callback=None, macros=None, macro_callback=None,
+                 show_dot=True):
         super().__init__()
+        # The coloured dot reports recording state, so it is only meaningful
+        # while speech-to-text is on; with it off the dot would sit on one
+        # colour forever. Kept regardless when there is no meter panel, since
+        # hiding both would leave an invisible window.
+        self._show_dot = bool(show_dot)
         self.hotkey_label = hotkey_label
         self._debug_callback = debug_callback
         self._on_close = on_close
@@ -185,9 +191,8 @@ class StatusWindow(QtWidgets.QWidget):
         # The header sits right of the dot and stacks one line per reading:
         # reset time, that time in UTC, refresh countdown — or the countdown
         # alone in cost-only mode. It never shrinks below the dot itself.
-        head_lines = 3 if show_usage else 1
-        self._header_h = max(self.DOT_D, head_lines * self._HEAD_LINE_H)
-        self._rows_top = self._PAD + self._header_h + 6  # first meter row's y
+        self._head_lines = 3 if show_usage else 1
+        self._recompute_header()
 
         self._drag_offset = None
         self._press_pos = None
@@ -213,10 +218,7 @@ class StatusWindow(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")  # override app QSS bg
         if self._has_panel:
-            height = self._rows_top + self._n_rows * self._ROW_H + self._PAD
-            if self._has_cmd_row:
-                height += self._CMD_H
-            self.setFixedSize(self.USAGE_W, height)
+            self.setFixedSize(self.USAGE_W, self._panel_height())
         else:
             self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(QtCore.Qt.OpenHandCursor)  # signal the dot is draggable
@@ -228,6 +230,34 @@ class StatusWindow(QtWidgets.QWidget):
             self._countdown_timer.setInterval(1000)
             self._countdown_timer.timeout.connect(self.update)  # repaint footer
             self._countdown_timer.start()
+
+    def _dot_visible(self):
+        """Whether the dot is actually painted (always, in dot-only mode)."""
+        return self._show_dot or not self._has_panel
+
+    def _recompute_header(self):
+        """Size the header band and the first row's y for the current dot state."""
+        floor = self.DOT_D if self._dot_visible() else 0
+        self._header_h = max(floor, self._head_lines * self._HEAD_LINE_H)
+        self._rows_top = self._PAD + self._header_h + 6
+
+    def _panel_height(self):
+        h = self._rows_top + self._n_rows * self._ROW_H + self._PAD
+        if self._has_cmd_row:
+            h += self._CMD_H
+        return h
+
+    def set_dot_visible(self, visible: bool):
+        """Show or hide the status dot, reflowing the panel around it."""
+        visible = bool(visible)
+        if visible == self._show_dot:
+            return
+        self._show_dot = visible
+        self._recompute_header()
+        if self._has_panel:
+            w = self.USAGE_W + (self._LEGEND_W if self._legend_open else 0)
+            self.setFixedSize(w, self._panel_height())
+        self.update()
 
     def _dot_rect(self):
         """(x, y, diameter) of the status dot within the window.
@@ -492,14 +522,15 @@ class StatusWindow(QtWidgets.QWidget):
             p.drawRoundedRect(QtCore.QRect(0, 0, self.USAGE_W, self.height()),
                               10, 10)
 
-        dx, dy, d = self._dot_rect()
-        # subtle dark halo so the dot stays visible on any background
-        p.setBrush(QtGui.QColor(0, 0, 0, 70))
-        p.drawEllipse(dx, dy, d, d)
-        # coloured status dot
-        m = 5
-        p.setBrush(QtGui.QColor(STATE_INFO[self.state][0]))
-        p.drawEllipse(dx + m, dy + m, d - 2 * m, d - 2 * m)
+        if self._dot_visible():
+            dx, dy, d = self._dot_rect()
+            # subtle dark halo so the dot stays visible on any background
+            p.setBrush(QtGui.QColor(0, 0, 0, 70))
+            p.drawEllipse(dx, dy, d, d)
+            # coloured status dot
+            m = 5
+            p.setBrush(QtGui.QColor(STATE_INFO[self.state][0]))
+            p.drawEllipse(dx + m, dy + m, d - 2 * m, d - 2 * m)
 
         if self._has_panel:
             self._paint_header(p)
@@ -690,6 +721,9 @@ class StatusWindow(QtWidgets.QWidget):
                 # Clicking the dot opens Settings; the "Commands ▾" footer
                 # opens the typed-commands menu; anywhere else on the meter
                 # (header reset, bars, spend) refreshes it.
+                # The dot's corner still opens Settings when the dot isn't
+                # drawn — otherwise a speech-off user's only way back to the
+                # toggle is the right-click menu.
                 dx, dy, d = self._dot_rect()
                 on_dot = local is not None and QtCore.QRect(dx, dy, d, d).contains(local)
                 on_cmds = (self._has_cmd_row and local is not None
@@ -815,6 +849,7 @@ def _resolve_start_pos(saved_x, saved_y, w, h):
 def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
                           on_close=None, initial_pos=None, on_move=None,
                           show_usage=False, show_cost=False, show_codex=False,
+                          show_dot=True,
                           usage_click_callback=None, macros=None,
                           macro_callback=None):
     """Create the QApplication (if needed) and the floating status dot.
@@ -840,6 +875,7 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
         show_usage=show_usage,
         show_cost=show_cost,
         show_codex=show_codex,
+        show_dot=show_dot,
         usage_click_callback=usage_click_callback,
         macros=macros,
         macro_callback=macro_callback,

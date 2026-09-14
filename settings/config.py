@@ -65,6 +65,7 @@ class VoiceConfig:
         # Load any previously-saved settings (best effort) so the platform
         # override and mic selection persist across runs.
         saved = self.load_from_file() or {}
+        had_saved = bool(saved)
 
         # ---- platform profile (drives OS-specific behaviour) ----------- #
         # Auto-detects the OS by default; can be pinned from the CLI or UI.
@@ -95,6 +96,21 @@ class VoiceConfig:
         # seconds, so keep it coarse; click the bars to refresh on demand.
         self.usage_enabled = not getattr(args, "no_usage", False)
         self.usage_refresh = getattr(args, "usage_refresh", 300)
+
+        # Speech-to-text is opt-in. The engine pulls a multi-GB model from
+        # Hugging Face the first time it runs, which is pure waste for someone
+        # who installed this for the usage panel and the typed-command
+        # hotkeys. Resolution order: an explicit CLI flag, then a stored
+        # preference, then a default that depends on whether this is a fresh
+        # install — off for a new one, on for an existing one whose settings
+        # predate this flag, so nobody's working setup goes quiet on upgrade.
+        cli_speech = getattr(args, "speech", None)
+        if cli_speech is not None:
+            self.speech_enabled = bool(cli_speech)
+        elif "speech_enabled" in saved:
+            self.speech_enabled = bool(saved["speech_enabled"])
+        else:
+            self.speech_enabled = had_saved
         self.max_buffer_size = 16000 * 30  # 30 seconds max buffer
         self.inactivity_timeout = 600  # 10 minutes
         # Default to the system's first input device (index 0); a persisted
@@ -170,6 +186,7 @@ class VoiceConfig:
             'trailing_silence': self.trailing_silence,
             'threshold_adjustment': self.threshold_adjustment,
             'inactivity_timeout': self.inactivity_timeout,
+            'speech_enabled': self.speech_enabled,
             'selected_microphone_index': self.selected_microphone_index,
             'window_x': self.window_x,
             'window_y': self.window_y,

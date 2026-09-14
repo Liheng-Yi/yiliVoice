@@ -435,6 +435,21 @@ class DebugUI:
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(6)
 
+        v.addWidget(self._heading("Speech-to-Text"))
+        self._speech_checkbox = QtWidgets.QCheckBox("Enable speech-to-text (dictation)")
+        self._speech_checkbox.setChecked(
+            bool(getattr(self.app.config, "speech_enabled", False))
+        )
+        self._speech_checkbox.toggled.connect(self._apply_speech_enabled)
+        v.addWidget(self._speech_checkbox)
+        v.addWidget(self._hint(
+            "Off by default: the usage panel and the typed-command hotkeys "
+            "work without it. Turning it on downloads the speech model "
+            "(~2.3 GB) the first time and can take several minutes — the dot "
+            "stays amber until it is ready. Turning it off takes effect at "
+            "once; the model's memory is freed on the next restart."
+        ))
+
         v.addWidget(self._heading("Platform & Acceleration"))
         self._system_info_text = self._info_box("#111827", height=230)
         v.addWidget(self._system_info_text)
@@ -461,6 +476,16 @@ class DebugUI:
         v.addStretch(1)
         self._refresh_system_tab()
         return w
+
+    def _apply_speech_enabled(self, checked):
+        """Hand the new setting to the app, which loads or stands down the stack."""
+        setter = getattr(self.app, "set_speech_enabled", None)
+        if setter is None:
+            return
+        try:
+            setter(bool(checked))
+        except Exception as exc:
+            print(f"Could not change the speech-to-text setting: {exc}")
 
     def _refresh_system_tab(self):
         if self._system_info_text is None:

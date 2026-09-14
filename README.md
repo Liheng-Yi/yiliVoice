@@ -71,7 +71,21 @@ pip install -r requirements.txt        # installs torch (CUDA) + keyboard on Win
 python yiliVoice.py
 ```
 
-The first run downloads the model weights (cached afterwards).
+### Speech-to-text is opt-in
+
+A fresh install starts with dictation **off**, so nothing is downloaded: the
+usage meter and the typed-command hotkeys work on their own. Turn dictation on
+in **Settings → System → Speech-to-Text** — the speech model (~2.3 GB) is
+fetched the first time you enable it, and the dot stays amber until it is
+ready. The setting persists, so later launches load the cached model straight
+away.
+
+While dictation is off the coloured status dot is hidden (it only reports
+recording state); right-click the meter to reach Settings.
+
+Upgrading an existing install keeps dictation on — your saved settings predate
+the flag, so nothing changes. `--speech` / `--no_speech` override the stored
+preference for a single run.
 
 ### Acceleration
 

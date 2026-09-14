@@ -109,7 +109,9 @@ class VoiceRecognitionApp:
         self.profile = config.profile
         self.backend = None          # transcription backend (faster-whisper / mlx)
         self.hotkeys = None          # global-hotkey manager
-        self.ready = False           # True once the model + audio are loaded
+        self.ready = False           # True once startup finishes (hotkeys may start)
+        self.speech_ready = False    # True once the STT model + audio are loaded
+        self._speech_loading = False  # guards against two concurrent loads
         self.device = self.profile.accelerator_label
         self.recorder = None
         self.source = None
@@ -775,7 +777,14 @@ class VoiceRecognitionApp:
         """Toggle recording state with proper resource management"""
         self.last_activity_time = datetime.now(timezone.utc)
 
-        if not self.ready:
+        if not self.config.speech_enabled:
+            print("Speech-to-text is off — enable it in Settings → Speech "
+                  "(the model downloads the first time you turn it on).")
+            return
+        if self._speech_loading:
+            print("Speech-to-text is still starting up — please wait a moment…")
+            return
+        if not self.speech_ready:
             print("Model still loading — please wait a moment…")
             return
 
@@ -1065,6 +1074,7 @@ class VoiceRecognitionApp:
             show_usage=self.show_usage,
             show_cost=self.show_cost,
             show_codex=self.show_codex,
+            show_dot=self.config.speech_enabled,
             usage_click_callback=self._request_usage_refresh,
             macros=macros,
             macro_callback=self.type_macro_from_menu,
@@ -1138,6 +1148,65 @@ class VoiceRecognitionApp:
 
         self.root = self.canvas = self.indicator = None
     
+    def _load_speech_stack(self):
+        """Load the STT backend, audio input and voice changer.
+
+        Split out of ``_background_init`` so enabling speech from Settings can
+        run the same path without a restart. Sets ``speech_ready`` only after
+        every piece is up, so a half-initialised stack can't be recorded into.
+        """
+        self.initialize_model()
+        self.use_streaming = getattr(self.backend, "supports_streaming", False)
+        self.initialize_audio()
+        self.initialize_voice_converter()
+        self.speech_ready = True
+
+    def set_speech_enabled(self, enabled: bool):
+        """Turn speech-to-text on or off at runtime (called from Settings).
+
+        Enabling loads the stack on a worker thread — the first run downloads
+        the model, which takes minutes — and shows the amber 'loading' dot
+        meanwhile. Disabling just stops recording and refuses further toggles;
+        the loaded model stays in memory until the next restart, since tearing
+        a live MLX backend down mid-session is riskier than the memory it
+        frees.
+        """
+        enabled = bool(enabled)
+        self.config.speech_enabled = enabled
+        self.config.save_to_file()
+        # The dot only reports recording state, so it follows the setting.
+        if self.window is not None:
+            setter = getattr(self.window, "set_dot_visible", None)
+            if setter is not None:
+                setter(enabled)
+
+        if not enabled:
+            if self.recording_event.is_set():
+                self.toggle_recording()
+            print("[Speech] Speech-to-text disabled. Restart to free the model's memory.")
+            return
+
+        if self.speech_ready or self._speech_loading:
+            return
+
+        self._speech_loading = True
+        self.update_indicator_safe(loading=True)
+
+        def worker():
+            try:
+                self._load_speech_stack()
+                print("[Speech] Speech-to-text enabled.")
+                self.update_indicator_safe()
+            except Exception as exc:
+                # Leave the setting on: the usual cause is a failed download,
+                # and retrying shouldn't mean re-ticking the box.
+                print(f"[Speech] Could not enable speech-to-text: {exc}")
+                self.update_indicator_safe()
+            finally:
+                self._speech_loading = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _background_init(self):
         """Load model + audio off the UI thread (keeps the window responsive).
 
@@ -1146,10 +1215,14 @@ class VoiceRecognitionApp:
         only after it has been pumping (see run()).
         """
         try:
-            self.initialize_model()
-            self.use_streaming = getattr(self.backend, "supports_streaming", False)
-            self.initialize_audio()
-            self.initialize_voice_converter()
+            if self.config.speech_enabled:
+                self._load_speech_stack()
+            else:
+                # Usage panel + typed-command hotkeys only. Nothing to
+                # download, so go straight to 'ready' instead of sitting amber.
+                print("[Speech] Speech-to-text is off — no model will be "
+                      "downloaded. Turn it on in Settings → Speech to enable "
+                      "dictation.")
             self.ready = True
             self.update_indicator_safe()  # 'loading' -> 'ready'
 
@@ -1250,6 +1323,12 @@ def main():
     parser.add_argument("--stream_block", default=0.5, type=float,
                         help="Streaming backends (Parakeet): mic capture block in seconds. "
                              "Smaller feels snappier but costs more per-chunk overhead.")
+    parser.add_argument("--speech", dest="speech", action='store_true', default=None,
+                        help="Force speech-to-text on for this run (downloads the "
+                             "model if it isn't cached).")
+    parser.add_argument("--no_speech", dest="speech", action='store_false',
+                        help="Force speech-to-text off for this run — usage panel "
+                             "and typed-command hotkeys only, no model download.")
     parser.add_argument("--no_usage", action='store_true',
                         help="Hide the Claude Code usage meter below the dot.")
     parser.add_argument("--usage_refresh", default=300, type=int,

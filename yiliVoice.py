@@ -63,16 +63,17 @@ TYPED_MACROS = [
      "then resolve that conversation — don't just reply and leave it open. "
      "If a reviewer requested changes, re-request their review.",
      "type_pr_comments"),
-    # The post/approve/watch protocol lives in ~/.claude/commands/
-    # pr-review-watch.md so it can be edited without an app restart; the
-    # macro just types /code-review (which must be user-typed — the skill is
-    # model-invocation-disabled) and points at the file. Accept the
-    # autocomplete yourself before sending.
+    # /code-review has to be user-typed (the skill is
+    # model-invocation-disabled), so the macro types it and spells the
+    # post/approve/watch protocol out inline. Accept the autocomplete
+    # yourself before sending. The polling is called out as a script because
+    # an idle model re-checking every 3 minutes for 12 hours burns tokens
+    # doing nothing.
     ("Code-review PR: post, approve & watch",
-     "/code-review Then follow ~/.claude/commands/pr-review-watch.md: post "
-     "the findings, approve if it's good to merge (no need to ask permission "
-     "to post), then watch the PR for new pushes and re-review each one "
-     "until it's merged or I stop you.",
+     "/code-review Then post the findings, approve if it's good to merge "
+     "(no need to ask permission to post), then watch the PR for new pushes "
+     "every 3 minutes for 12 hours (use a script instead of consuming "
+     "tokens) and re-review each one until it's merged or I stop you.",
      "type_code_review_pr"),
     ("Setup env & run localhost",
      "/worktree-setup Skip creating the worktree — I'm already in the right "

@@ -122,6 +122,11 @@ class StatusWindow(QtWidgets.QWidget):
     # row measures. _LEGEND_GAP is the transparent seam between the two panels.
     _LEGEND_W = 112
     _LEGEND_GAP = 4
+    # Drag-to-zoom: how wide the grab strip on the right/bottom edge is (in
+    # widget pixels, so it stays the same physical size at any zoom).
+    _RESIZE_EDGE = 6
+    MIN_SCALE = 1.0
+    MAX_SCALE = 3.0
     _BACKDROP_ALPHA = 140           # panel background opacity (0-255); lower = more see-through
 
     # Usage-bar fill colour by level: calm under 70%, warning, then alarm.
@@ -134,8 +139,15 @@ class StatusWindow(QtWidgets.QWidget):
     def __init__(self, hotkey_label="the hotkey", debug_callback=None, on_close=None,
                  show_usage=False, show_cost=False, show_codex=False,
                  usage_click_callback=None, macros=None, macro_callback=None,
-                 show_dot=True):
+                 show_dot=True, scale=1.0, on_scale=None):
         super().__init__()
+        # Everything below is authored in "design pixels"; paintEvent applies
+        # this factor so bars, text and the dot all grow together. Widget
+        # coordinates are design * _scale — see _to_design() for hit testing.
+        self._scale = min(max(float(scale or 1.0), self.MIN_SCALE), self.MAX_SCALE)
+        self._on_scale = on_scale
+        self._resize_mode = None     # None | 'right' | 'bottom' | 'corner'
+        self._resize_origin = None   # (global QPoint, scale) at drag start
         # The coloured dot reports recording state, so it is only meaningful
         # while speech-to-text is on; with it off the dot would sit on one
         # colour forever. Kept regardless when there is no meter panel, since
@@ -217,11 +229,9 @@ class StatusWindow(QtWidgets.QWidget):
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")  # override app QSS bg
-        if self._has_panel:
-            self.setFixedSize(self.USAGE_W, self._panel_height())
-        else:
-            self.setFixedSize(self.SIZE, self.SIZE)
+        self._apply_size()
         self.setCursor(QtCore.Qt.OpenHandCursor)  # signal the dot is draggable
+        self.setMouseTracking(True)  # so the edge can show a resize cursor
         self._refresh_tooltip()
 
         # Tick the refresh countdown once a second (panel only).
@@ -242,10 +252,37 @@ class StatusWindow(QtWidgets.QWidget):
         self._rows_top = self._PAD + self._header_h + 6
 
     def _panel_height(self):
+        """Panel height in design pixels (before _scale)."""
         h = self._rows_top + self._n_rows * self._ROW_H + self._PAD
         if self._has_cmd_row:
             h += self._CMD_H
         return h
+
+    def _design_size(self):
+        """(width, height) in design pixels, legend included when open."""
+        if not self._has_panel:
+            return (self.SIZE, self.SIZE)
+        w = self.USAGE_W + (self._LEGEND_W if self._legend_open else 0)
+        return (w, self._panel_height())
+
+    def _apply_size(self):
+        """Resize the widget to the current design size times _scale."""
+        w, h = self._design_size()
+        self.setFixedSize(round(w * self._scale), round(h * self._scale))
+
+    def _to_design(self, pt):
+        """Widget point -> design point (undo the zoom)."""
+        s = self._scale or 1.0
+        return QtCore.QPoint(round(pt.x() / s), round(pt.y() / s))
+
+    def set_scale(self, scale):
+        """Zoom the whole overlay; 1.0 is the authored size."""
+        scale = min(max(float(scale), self.MIN_SCALE), self.MAX_SCALE)
+        if abs(scale - self._scale) < 1e-3:
+            return
+        self._scale = scale
+        self._apply_size()
+        self.update()
 
     def set_dot_visible(self, visible: bool):
         """Show or hide the status dot, reflowing the panel around it."""
@@ -254,9 +291,7 @@ class StatusWindow(QtWidgets.QWidget):
             return
         self._show_dot = visible
         self._recompute_header()
-        if self._has_panel:
-            w = self.USAGE_W + (self._LEGEND_W if self._legend_open else 0)
-            self.setFixedSize(w, self._panel_height())
+        self._apply_size()
         self.update()
 
     def _dot_rect(self):
@@ -318,23 +353,70 @@ class StatusWindow(QtWidgets.QWidget):
         if not self._has_panel or open_ == self._legend_open:
             return
         pos = self.pos()
-        h = self.height()
+        # The legend is _LEGEND_W design px, so on screen it is that times the
+        # zoom — otherwise a zoomed panel would slide the wrong distance.
+        slide = round(self._LEGEND_W * self._scale)
         if open_:
-            target_x = pos.x() - self._LEGEND_W
+            target_x = pos.x() - slide
             scr = self.screen()
             if scr is not None:
                 target_x = max(target_x, scr.availableGeometry().left())
             self._legend_shift = pos.x() - target_x
             self._legend_open = True
-            self.setFixedSize(self.USAGE_W + self._LEGEND_W, h)
+            self._apply_size()
             self.move(target_x, pos.y())
         else:
             shift = self._legend_shift
             self._legend_open = False
             self._legend_shift = 0
-            self.setFixedSize(self.USAGE_W, h)
+            self._apply_size()
             self.move(pos.x() + shift, pos.y())
         self.update()
+
+    def _edge_at(self, pos):
+        """Which resize edge *pos* (widget px) is on, or None.
+
+        Only the right and bottom edges grab: the legend slides out of the
+        left edge, and the window is anchored by its top-left, so growing
+        down-right is the one direction that doesn't fight either of those.
+        """
+        if not self._has_panel:
+            return None
+        e = self._RESIZE_EDGE
+        on_r = pos.x() >= self.width() - e
+        on_b = pos.y() >= self.height() - e
+        if on_r and on_b:
+            return "corner"
+        if on_r:
+            return "right"
+        if on_b:
+            return "bottom"
+        return None
+
+    _EDGE_CURSORS = {
+        "right": QtCore.Qt.SizeHorCursor,
+        "bottom": QtCore.Qt.SizeVerCursor,
+        "corner": QtCore.Qt.SizeFDiagCursor,
+    }
+
+    def _update_cursor(self, pos):
+        edge = self._edge_at(pos)
+        self.setCursor(self._EDGE_CURSORS.get(edge, QtCore.Qt.OpenHandCursor))
+
+    def _resize_to(self, gpos):
+        """Zoom from the drag so far (design size is the reference, not the
+        current size, so the factor can't drift as the window grows)."""
+        start_pos, start_scale = self._resize_origin
+        dw, dh = self._design_size()
+        dx = gpos.x() - start_pos.x()
+        dy = gpos.y() - start_pos.y()
+        cands = []
+        if self._resize_mode in ("right", "corner"):
+            cands.append((dw * start_scale + dx) / dw)
+        if self._resize_mode in ("bottom", "corner"):
+            cands.append((dh * start_scale + dy) / dh)
+        if cands:
+            self.set_scale(max(cands))
 
     def enterEvent(self, e):
         super().enterEvent(e)
@@ -507,6 +589,10 @@ class StatusWindow(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         p.setPen(QtCore.Qt.NoPen)
+        # One scale for the whole panel: every constant below stays in design
+        # pixels, and fonts scale with it because Qt scales the pen and glyphs.
+        if self._scale != 1.0:
+            p.scale(self._scale, self._scale)
 
         if self._legend_open:
             self._paint_legend(p)
@@ -519,8 +605,8 @@ class StatusWindow(QtWidgets.QWidget):
         if self._has_panel:
             # Rounded translucent backdrop so the rows read on any wallpaper.
             p.setBrush(QtGui.QColor(11, 13, 17, self._BACKDROP_ALPHA))
-            p.drawRoundedRect(QtCore.QRect(0, 0, self.USAGE_W, self.height()),
-                              10, 10)
+            p.drawRoundedRect(
+                QtCore.QRect(0, 0, self.USAGE_W, self._panel_height()), 10, 10)
 
         if self._dot_visible():
             dx, dy, d = self._dot_rect()
@@ -545,7 +631,7 @@ class StatusWindow(QtWidgets.QWidget):
         w = self._LEGEND_W - self._LEGEND_GAP
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(QtGui.QColor(11, 13, 17, self._BACKDROP_ALPHA))
-        p.drawRoundedRect(QtCore.QRect(0, 0, w, self.height()), 10, 10)
+        p.drawRoundedRect(QtCore.QRect(0, 0, w, self._panel_height()), 10, 10)
 
         font = QtGui.QFont()
         font.setPixelSize(9)
@@ -666,10 +752,20 @@ class StatusWindow(QtWidgets.QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.LeftButton:
+            edge = self._edge_at(e.position().toPoint())
+            if edge is not None:
+                # Zoom drag, not a move drag: claim the press and leave the
+                # move/click state untouched so releasing can't be read as a
+                # click on whatever sits under the edge.
+                self._resize_mode = edge
+                self._resize_origin = (e.globalPosition().toPoint(), self._scale)
+                e.accept()
+                return
             self._press_pos = e.globalPosition().toPoint()
             # In meter coordinates, so the dot / Commands hit tests below don't
             # have to know whether the legend is out.
-            self._press_local = e.position().toPoint() - QtCore.QPoint(self._x0(), 0)
+            self._press_local = (self._to_design(e.position().toPoint())
+                                 - QtCore.QPoint(self._x0(), 0))
             self._press_win_pos = self.pos()
             self._drag_offset = self._press_pos - self.frameGeometry().topLeft()
             self._moved = False
@@ -678,7 +774,14 @@ class StatusWindow(QtWidgets.QWidget):
             e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._drag_offset is None or not (e.buttons() & QtCore.Qt.LeftButton):
+        if self._resize_mode is not None:
+            self._resize_to(e.globalPosition().toPoint())
+            e.accept()
+            return
+        if not (e.buttons() & QtCore.Qt.LeftButton):
+            self._update_cursor(e.position().toPoint())  # hover feedback
+            return
+        if self._drag_offset is None:
             return
         gp = e.globalPosition().toPoint()
         # Wait until the pointer clearly moves so a small wobble on click still
@@ -700,6 +803,17 @@ class StatusWindow(QtWidgets.QWidget):
         e.accept()
 
     def mouseReleaseEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton and self._resize_mode is not None:
+            self._resize_mode = None
+            self._resize_origin = None
+            self._update_cursor(e.position().toPoint())
+            if self._on_scale:
+                try:
+                    self._on_scale(self._scale)
+                except Exception as exc:
+                    print(f"Could not save the overlay size: {exc}")
+            e.accept()
+            return
         if e.button() == QtCore.Qt.LeftButton:
             # Click vs drag: use the movement flag, but also compare the net
             # window displacement, since after a native move mouseMoveEvent may
@@ -849,7 +963,7 @@ def _resolve_start_pos(saved_x, saved_y, w, h):
 def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
                           on_close=None, initial_pos=None, on_move=None,
                           show_usage=False, show_cost=False, show_codex=False,
-                          show_dot=True,
+                          show_dot=True, scale=1.0, on_scale=None,
                           usage_click_callback=None, macros=None,
                           macro_callback=None):
     """Create the QApplication (if needed) and the floating status dot.
@@ -876,6 +990,8 @@ def create_overlay_window(debug_callback=None, hotkey_label="the hotkey",
         show_cost=show_cost,
         show_codex=show_codex,
         show_dot=show_dot,
+        scale=scale,
+        on_scale=on_scale,
         usage_click_callback=usage_click_callback,
         macros=macros,
         macro_callback=macro_callback,

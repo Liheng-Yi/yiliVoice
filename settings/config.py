@@ -123,6 +123,15 @@ class VoiceConfig:
         self.window_x = saved.get("window_x")
         self.window_y = saved.get("window_y")
 
+        # Overlay zoom, set by dragging the dot's right/bottom edge. The panel
+        # is painted from fixed pixel constants, so this scales the whole thing
+        # uniformly rather than reflowing it.
+        try:
+            self.ui_scale = float(saved.get("ui_scale", 1.0))
+        except (TypeError, ValueError):
+            self.ui_scale = 1.0
+        self.ui_scale = min(max(self.ui_scale, 1.0), 3.0)
+
         # ------------------------------------------------------------------ #
         # Load external filter lists (filters.json)                           #
         # ------------------------------------------------------------------ #
@@ -188,6 +197,7 @@ class VoiceConfig:
             'inactivity_timeout': self.inactivity_timeout,
             'speech_enabled': self.speech_enabled,
             'selected_microphone_index': self.selected_microphone_index,
+            'ui_scale': self.ui_scale,
             'window_x': self.window_x,
             'window_y': self.window_y,
             'timestamp': datetime.now().isoformat()

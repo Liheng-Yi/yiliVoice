@@ -1025,6 +1025,11 @@ class VoiceRecognitionApp:
         if self.ready and self.hotkeys is None:
             self.setup_hotkeys()
 
+    def _on_window_scaled(self, scale):
+        """Persist the overlay zoom after a drag on its edge."""
+        self.config.ui_scale = scale
+        self.config.save_to_file()
+
     def _on_window_moved(self, x, y):
         """Persist the dot's new position (debounced by the window)."""
         self.config.window_x = x
@@ -1075,6 +1080,8 @@ class VoiceRecognitionApp:
             show_cost=self.show_cost,
             show_codex=self.show_codex,
             show_dot=self.config.speech_enabled,
+            scale=getattr(self.config, "ui_scale", 1.0),
+            on_scale=self._on_window_scaled,
             usage_click_callback=self._request_usage_refresh,
             macros=macros,
             macro_callback=self.type_macro_from_menu,

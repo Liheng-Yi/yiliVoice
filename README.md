@@ -133,6 +133,10 @@ Hotkeys differ per OS (and are listed in the System tab):
 > permission for your terminal app (System Settings → Privacy & Security),
 > then a full restart of that terminal. Without it the hotkeys do nothing.
 
+**Resize it** by dragging the overlay's right or bottom edge — the cursor
+turns into a resize arrow when you're on the strip. The whole panel zooms
+uniformly (1x–3x) and the size is remembered across launches.
+
 The overlay appears at the top-center of the screen (just below the macOS
 menu bar) on first run; **drag it anywhere** and it remembers the spot across
 launches (validated against your monitor layout, so unplugging a display can't

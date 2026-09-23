@@ -48,14 +48,18 @@ source .venv/bin/activate
 pip install -r requirements.txt   # installs parakeet-mlx + mlx-whisper + pynput
 ```
 
-**Grant permissions once** (System Settings → Privacy & Security) to the app
-you launch from (Terminal / iTerm / your IDE):
+**Permissions are requested on first use, not at launch.** A fresh run asks
+for nothing; each grant is requested by the feature that needs it, and only
+ever for the app you launch from (Terminal / iTerm / Ghostty / your IDE):
 
-- **Microphone** – to capture audio
-- **Accessibility** – so transcribed text can be typed into other apps
-- **Input Monitoring** – so the global hotkeys work
+- **Accessibility** – asked the first time a macro or dictation types text
+- **Input Monitoring** – asked by **Settings → System → “Grant hotkey
+  permissions…”**, since nothing can detect a hotkey press before the grant
+  exists
+- **Microphone** – asked when you first enable speech-to-text
 
-No `sudo` required.
+macOS only applies a new grant to a freshly started process, so fully quit
+the terminal and reopen it after granting. No `sudo` required.
 
 ### Windows
 

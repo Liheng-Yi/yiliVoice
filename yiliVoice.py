@@ -1,6 +1,7 @@
 import argparse
 import os
 import signal
+import sys
 import numpy as np
 import speech_recognition as sr
 import threading
@@ -15,6 +16,9 @@ from queue import Queue, Empty, Full
 from settings import (
     VoiceConfig, DebugUI,
     create_overlay_window, update_indicator,
+)
+from utils.hotkeys import (
+    macos_accessibility_trusted, macos_input_monitoring_trusted,
 )
 from utils import (
     AudioBuffer, clean_sentence, normalize_filter_text,
@@ -71,7 +75,9 @@ TYPED_MACROS = [
     # doing nothing.
     ("Code-review PR: post, approve & watch",
      "/code-review Then post the findings, approve if it's good to merge "
-     "(no need to ask permission to post), then watch the PR for new pushes "
+     "(no need to ask permission to post). If there is already a Trio "
+     "review, treat it as a bot review and review the PR again, but don't "
+     "repeat issues that Trio already raised. Then watch the PR for new pushes "
      "every 3 minutes for 12 hours (use a script instead of consuming "
      "tokens) and re-review each one until it's merged or I stop you.",
      "type_code_review_pr"),
@@ -112,6 +118,9 @@ class VoiceRecognitionApp:
         self.ready = False           # True once startup finishes (hotkeys may start)
         self.speech_ready = False    # True once the STT model + audio are loaded
         self._speech_loading = False  # guards against two concurrent loads
+        # macOS permission dialogs are raised on first use, not at launch, and
+        # at most once per run — see _ensure_typing_permission().
+        self._prompted_typing = False
         self.device = self.profile.accelerator_label
         self.recorder = None
         self.source = None
@@ -694,6 +703,44 @@ class VoiceRecognitionApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _ensure_typing_permission(self):
+        """Ask for Accessibility the first time we actually type something.
+
+        Typing synthetic keystrokes is what needs this grant, so the dialog
+        belongs at the first macro or dictation rather than at launch. Asked
+        at most once per run: macOS only shows the dialog while the app is
+        untrusted, and re-asking on every keystroke would be its own pestering.
+        """
+        if sys.platform != "darwin" or self._prompted_typing:
+            return
+        try:
+            if macos_accessibility_trusted(prompt=False):
+                self._prompted_typing = True
+                return
+            self._prompted_typing = True
+            print("[Permissions] Asking for Accessibility so text can be typed "
+                  "out. Grant it, then fully quit and reopen the terminal.")
+            macos_accessibility_trusted(prompt=True)
+        except Exception:
+            pass
+
+    def request_hotkey_permissions(self):
+        """Ask macOS for both hotkey grants (bound to the Settings button).
+
+        Returns ``(input_monitoring, accessibility)`` as booleans/None. This is
+        the one place that prompts for Input Monitoring: nothing can detect a
+        hotkey press before the grant exists, so there is no "on first use"
+        moment for it — clicking the button is that moment.
+        """
+        try:
+            mon = macos_input_monitoring_trusted(prompt=True)
+            acc = macos_accessibility_trusted(prompt=True)
+            self._prompted_typing = True
+            return (mon, acc)
+        except Exception as exc:
+            print(f"[Permissions] Could not request access: {exc}")
+            return (None, None)
+
     def _type_macro(self, text):
         """Type a fixed string into whatever window has focus.
 
@@ -706,6 +753,7 @@ class VoiceRecognitionApp:
 
         def worker():
             try:
+                self._ensure_typing_permission()
                 self.typer.type_isolated(text)
             except Exception as exc:
                 print(f"[Hotkeys] macro type error: {exc}")
@@ -741,12 +789,12 @@ class VoiceRecognitionApp:
         if self.profile.detected_os != "macos":
             return
         try:
-            from utils.hotkeys import (
-                macos_accessibility_trusted,
-                macos_input_monitoring_trusted,
-            )
-            input_mon = macos_input_monitoring_trusted(prompt=True)
-            accessibility = macos_accessibility_trusted(prompt=True)
+            # prompt=False: a fresh launch must not stack up system dialogs
+            # for features the user may never touch. The prompts come from
+            # _ensure_typing_permission() on the first macro/dictation, and
+            # from the Settings button for hotkeys.
+            input_mon = macos_input_monitoring_trusted(prompt=False)
+            accessibility = macos_accessibility_trusted(prompt=False)
         except Exception:
             input_mon = accessibility = None
 
@@ -765,8 +813,9 @@ class VoiceRecognitionApp:
         print("     your terminal app in System Settings → Privacy & Security:")
         print(f"        •  Input Monitoring   [{mark(input_mon)}]   ← receives the hotkey")
         print(f"        •  Accessibility      [{mark(accessibility)}]   ← types the text out")
-        print("     Enable the missing one(s), then FULLY QUIT the terminal,")
-        print("     reopen it, and run again.")
+        print("     Settings → System → “Grant hotkey permissions…” asks macOS")
+        print("     for them, or enable them by hand. Either way, FULLY QUIT")
+        print("     the terminal, reopen it, and run again.")
         print(bar + "\n")
 
     def _on_hotkey_activity(self):

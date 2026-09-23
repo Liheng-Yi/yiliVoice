@@ -450,6 +450,21 @@ class DebugUI:
             "once; the model's memory is freed on the next restart."
         ))
 
+        v.addWidget(self._heading("Permissions (macOS)"))
+        self._perm_btn = QtWidgets.QPushButton("Grant hotkey permissions…")
+        self._perm_btn.clicked.connect(self._request_hotkey_permissions)
+        self._perm_btn.setMaximumWidth(240)
+        v.addWidget(self._perm_btn, alignment=QtCore.Qt.AlignLeft)
+        self._perm_status = self._label("")
+        v.addWidget(self._perm_status)
+        v.addWidget(self._hint(
+            "Global hotkeys need Input Monitoring (to receive the key) and "
+            "Accessibility (to type the text out). Nothing is requested at "
+            "launch — click the button when you want the hotkeys, then FULLY "
+            "QUIT the terminal and reopen it, since macOS only applies a new "
+            "grant to a freshly started process."
+        ))
+
         v.addWidget(self._heading("Platform & Acceleration"))
         self._system_info_text = self._info_box("#111827", height=230)
         v.addWidget(self._system_info_text)
@@ -476,6 +491,22 @@ class DebugUI:
         v.addStretch(1)
         self._refresh_system_tab()
         return w
+
+    def _request_hotkey_permissions(self):
+        """Ask macOS for the hotkey grants and report what came back."""
+        req = getattr(self.app, "request_hotkey_permissions", None)
+        if req is None:
+            return
+        mon, acc = req()
+
+        def mark(state):
+            return "granted" if state else ("missing" if state is False else "unknown")
+
+        if self._perm_status is not None:
+            self._perm_status.setText(
+                f"Input Monitoring: {mark(mon)}   ·   Accessibility: {mark(acc)}"
+                + ("" if (mon and acc) else "   — restart the terminal after granting")
+            )
 
     def _apply_speech_enabled(self, checked):
         """Hand the new setting to the app, which loads or stands down the stack."""
